@@ -153,35 +153,42 @@ struct RoomCaptureHost: UIViewRepresentable {
 
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {}
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(model: model)
+    func makeCoordinator() -> RoomCaptureCoordinator {
+        RoomCaptureCoordinator(model: model)
+    }
+}
+
+/// Delegate for RoomCaptureView.
+///
+/// This lives at file scope rather than nested inside `RoomCaptureHost`:
+/// `RoomCaptureViewDelegate` inherits `NSCoding`, and Swift cannot give a
+/// nested type a stable Objective-C runtime name, so an explicit `@objc`
+/// name is required.
+@objc(SMRoomCaptureCoordinator)
+final class RoomCaptureCoordinator: NSObject, RoomCaptureViewDelegate {
+    private let model: ScanSessionModel
+
+    init(model: ScanSessionModel) {
+        self.model = model
+        super.init()
     }
 
-    final class Coordinator: NSObject, RoomCaptureViewDelegate {
-        private let model: ScanSessionModel
+    // NSCoding conformance is only inherited from the delegate protocol —
+    // the coordinator is never archived, so these are minimal stubs.
+    func encode(with coder: NSCoder) {}
+    init?(coder: NSCoder) { return nil }
 
-        init(model: ScanSessionModel) {
-            self.model = model
-            super.init()
-        }
+    func captureView(shouldPresent roomDataForProcessing: CapturedRoomData,
+                     error: Error?) -> Bool {
+        true
+    }
 
-        // RoomCaptureViewDelegate inherits NSCoding; the coordinator is never
-        // archived, so these are minimal conformances.
-        func encode(with coder: NSCoder) {}
-        required init?(coder: NSCoder) { return nil }
-
-        func captureView(shouldPresent roomDataForProcessing: CapturedRoomData,
-                         error: Error?) -> Bool {
-            true
-        }
-
-        func captureView(didPresent processedResult: CapturedRoom, error: Error?) {
-            Task { @MainActor in
-                if let error {
-                    model.phase = .failed(error.localizedDescription)
-                } else {
-                    model.phase = .finished(processedResult)
-                }
+    func captureView(didPresent processedResult: CapturedRoom, error: Error?) {
+        Task { @MainActor in
+            if let error {
+                model.phase = .failed(error.localizedDescription)
+            } else {
+                model.phase = .finished(processedResult)
             }
         }
     }
