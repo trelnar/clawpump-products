@@ -622,7 +622,7 @@ This skill produces recommendations. Sibling skills enforce and act on them:
 - **risk-limits** enforces the 5% hard position cap and the portfolio emergency stop.
 - **execution** places all orders on automatable venues.
 - **approval-gate** handles first-buy approvals for non-whitelisted assets and every advanced-instrument approval.
-- **gatekeeper** screens Solana tokens before any token buy; exchange-listed crypto is not screened (execution's gate table governs).
+- **execution**'s exit-safety check verifies a token position can be sold and exited at size before any buy. It never rejects for age, hype, or quality — those are signals for this skill to weigh, not veto criteria.
 - **trade-journal** logs every forecast and measures calibration.
 - **backtest-replay** tests challenger models and controls model promotion.
 - **alert-format** defines the exact SMS wire format, including character-set rules, and supersedes the template typography above for SMS delivery.

@@ -63,7 +63,7 @@ Trigger: [only when relevant]
 Rules:
 
 - The action must be one of: `BUY NOW`, `COMING UP`, `HOLD`, `ADD`, `SELL NOW`.
-- Identify the asset by ticker plus venue for equities, ticker plus chain for tokens. On any ticker-impersonation risk (**gatekeeper**), append the short contract address.
+- Identify the asset by ticker plus venue for equities, ticker plus chain for tokens. On any ticker-impersonation risk, append the short contract address.
 - Omit fields that do not apply: `Buy zone` on HOLD and SELL NOW, `Trigger` when none exists, `P(5x)` when not modeled. Never omit price, `P(2x)`, or `Conf`.
 - SELL NOW replaces `Buy zone` with `Exit: [reason, <=6 words]` and current position P&L.
 - For alert-only venues (Robinhood, Crypto.com — see **execution**), append `MANUAL - no API. Trade by hand.` The bot never places these orders.

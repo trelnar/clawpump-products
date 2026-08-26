@@ -47,16 +47,18 @@ Every order must pass all applicable gates, in this order, immediately before su
 | 1 | Halt / kill switch | Buys only | **portfolio-state** halt mode is NORMAL — this covers EMERGENCY_HALT, USER_STOP, RECON_FREEZE, and SELL_ONLY (halt conditions per **risk-limits**). SELL NOW executes even during a halt. |
 | 2 | Stale data | All orders | Quote and research data no older than the stale-data limit (table below). Otherwise re-quote before proceeding. |
 | 3 | Risk limits | Buys and adds | **risk-limits** confirms the order keeps the position at or under 5% of total trading portfolio value and violates no other hard limit. |
-| 4 | Gatekeeper | Token buys and adds | A **gatekeeper** PASS verdict for the token, fresh within the freshness window (table below). DEAD or WALK blocks the buy. A stale PASS requires a re-run. **gatekeeper** screens Solana tokens only; a token it cannot screen (UNSUPPORTED) fails the gate and the ticket downgrades to alert-only. |
+| 4 | Exit safety | Token buys and adds | A read-only exit-safety check, fresh within the freshness window (table below): a simulated sell of the intended position notional succeeds, transfer tax is at or under the cap, and the pool or book is deep enough to exit the full position within the liquidity-based cap in **risk-limits**. Cannot-sell, tax over cap, or insufficient exit depth blocks the buy. Nothing else does: age, holder counts, hype, and token quality are never rejection criteria — risk is modeled by **short-horizon-research**, not vetoed here. |
 | 5 | Approval gate | First-time buys; advanced-instrument opens | **approval-gate** shows the asset whitelisted, or an explicit SMS approval for this ticket. Approval is required to open an advanced-instrument position (options, leverage, shorts, futures, perps) — every time, never whitelist-able. Closing, reducing, or exiting an existing advanced position is an exit: automatic, never gated on approval. |
 
-Blocked-buy notification: when a BUY NOW ticket for an already-alerted asset is blocked by gates 3–5, send a short SMS naming the blocking gate and the measured value (example: `NOT BOUGHT <asset>: gatekeeper WALK, age 11h < 24h`) so the user can act manually or adjust editable thresholds deliberately.
+Blocked-buy notification: when a BUY NOW ticket for an already-alerted asset is blocked by gates 3–5, send a short SMS naming the blocking gate and the measured value (example: `NOT BOUGHT <asset>: exit-safety, sell-sim failed`) so the user can act manually or adjust editable thresholds deliberately.
 
 Gate timing defaults. Edit the table; it's plain Markdown.
 
 | Parameter | Default |
 |---|---|
-| Gatekeeper PASS freshness window | 10 minutes |
+| Exit-safety check freshness window | 10 minutes |
+| Max transfer tax (exit-safety) | 10% |
+| Pre-trade gate time budget | 5 seconds |
 | Max quote age at submission | 5 seconds (crypto), 10 seconds (equities) |
 | Max research-timestamp age for BUY NOW | 15 minutes; older tickets return to **short-horizon-research** for revalidation |
 
@@ -94,7 +96,7 @@ Classify the asset by visible liquidity at order time. Edit the table; it's plai
 
 ### DEX swap rules (on-chain tokens)
 
-DEX automation is user-approved (2026-08-26). Solana tokens only until **gatekeeper** covers other chains — an UNSUPPORTED verdict keeps the token alert-only (gate 4).
+DEX automation is user-approved (2026-08-26).
 
 - Set swap slippage tolerance to the tier cap, never higher.
 - Route swaps through an MEV-protected or private RPC. Never broadcast swaps above the public-mempool ceiling through a public mempool.

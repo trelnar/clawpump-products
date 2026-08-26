@@ -39,22 +39,7 @@ Thirty seconds. Pennies in compute. One rug avoided pays for a thousand runs.
 
 ## Threshold notes
 
-Defaults are tuned for small speculative positions ($40–$500). The liquidity-depth floor (check #7) should scale with your position size — a $5,000 position needs a far deeper pool to exit than a $50 one. Edit the SKILL.md table; it's plain Markdown.
-
-## The trading-bot skill suite
-
-This repo also ships ten sibling skills that together form a live trading bot. Unlike Gatekeeper, that suite drives live, real-money order placement on venues the user enables. Gatekeeper's never-trades guarantee applies to the gatekeeper skill only — it does not extend to the rest of the repo. And `npx skills add trelnar/clawpump-products` imports the whole repo, so install selectively if the screener is all you want.
-
-- **short-horizon-research** — finds and scores short-horizon trade candidates
-- **execution** — places and manages orders on the venues the user has enabled
-- **approval-gate** — the SMS approval flow for trades that need a human yes
-- **risk-limits** — position sizing, exposure caps, and the drawdown halt
-- **portfolio-state** — tracks holdings, balances, and flow-adjusted portfolio value
-- **trade-journal** — records every trade, decision, and outcome
-- **backtest-replay** — backtests strategies and governs shadow-mode promotion
-- **vps-ops** — keeps the bot's server alive, patched, and monitored
-- **alert-format** — formats the SMS alerts and reports the bot sends
-- **docs-voice** — the writing style guide for the suite's documentation
+Defaults are tuned for small speculative positions ($40–$500). The liquidity-depth floor (check #5) should scale with your position size — a $5,000 position needs a far deeper pool to exit than a $50 one. Edit the SKILL.md table; it's plain Markdown.
 
 ---
 

@@ -28,7 +28,7 @@ Requirements:
 
 ## Survivorship
 
-The replay universe is every asset that produced a recorded discovery event in the period. That includes tokens that rugged, tokens **gatekeeper** would kill today, stocks that halted, and assets that were delisted or went to zero. Excluding losers from the universe invalidates the run: a model scored only on survivors is scored on the answer key.
+The replay universe is every asset that produced a recorded discovery event in the period. That includes tokens that rugged, tokens that would fail today's exit-safety check, stocks that halted, and assets that were delisted or went to zero. Excluding losers from the universe invalidates the run: a model scored only on survivors is scored on the answer key.
 
 - A rugged or drained token held at rug time scores as a total loss of the position.
 - A halted stock held at halt scores at the post-halt reopening price; if it never reopened in the window, score it as a total loss.

@@ -28,7 +28,7 @@ The journal is history. Current state lives in **portfolio-state** and must alwa
 | **risk-limits** | Every rejection: limit name, measured value, limit value; halt triggers; STOP and FLATTEN events |
 | **portfolio-state** | Halt-mode transitions, reconciliation results and adjustments, freezes, recovery sequences, cash flows |
 | **alert-format** | Every outbound alert: type, content, delivery status |
-| **gatekeeper** | Every screening verdict, including PASSes that were never traded — **backtest-replay** uses them |
+| **execution** (exit safety) | Every exit-safety check result, including checks that were never traded — **backtest-replay** uses them |
 | **vps-ops** | Incidents, watchdog pauses and resumes |
 | **backtest-replay** | Promotion and demotion summaries; shadow-mode forecasts, flagged as shadow |
 
@@ -66,7 +66,7 @@ Record the evidence state completely enough that **backtest-replay** can re-run 
 | `alerts` | alert_id, ts, direction (outbound / inbound), kind, asset_id, body, delivery_status, parse_result, supersedes |
 | `outcomes` | outcome_id, ts, forecast_id, window_close_ts, resolution_basis (filled / unfilled), max_multiple, hit_2x, hit_3x, hit_5x, hit_10x, time_to_2x, exit_result, realized_multiple, realized_pnl_pct, entry_slippage, exit_slippage, supersedes |
 | `events` | event_id, ts, kind (state_transition / risk_rejection / gate_block / recon / security / missed_opportunity / false_positive / ops), ref_id, detail, supersedes |
-| `screen_verdicts` | verdict_id, ts, asset_id, contract_address, verdict (PASS / DEAD / WALK / UNSUPPORTED), measured_values, supersedes |
+| `exit_checks` | check_id, ts, asset_id, contract_address, result (PASS / FAIL), fail_reason, measured_values, supersedes |
 | `discovery_inputs` | input_id, ts, asset_id, source, payload, supersedes |
 
 Every foreign reference (`forecast_id`, `order_id`, `ticket_id`) must be recorded at write time. An orphan row that cannot be joined back to its forecast is a journaling bug; log it as an `events` row and fix the writer.

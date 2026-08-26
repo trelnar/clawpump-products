@@ -25,10 +25,10 @@ The gate applies to every venue marked Automated in the **execution** routing ta
 
 The whitelist is per asset, not per trade.
 
-- Key each entry by canonical identifier: exchange symbol plus venue for equities; contract address plus chain for tokens. Never key by display ticker alone — tickers are impersonated (see **gatekeeper**).
+- Key each entry by canonical identifier: exchange symbol plus venue for equities; contract address plus chain for tokens. Never key by display ticker alone — tickers are impersonated.
 - A `YES` reply approves the requested buy and whitelists the asset in one step.
 - Whitelisted assets: the bot buys, adds, holds, and sells automatically, subject to **risk-limits** (5% max automatic position size, 20%/24h halt).
-- Whitelisting never exempts an asset from **gatekeeper** screening or **short-horizon-research** revalidation. It removes the approval step, nothing else.
+- Whitelisting never exempts an asset from **execution**'s exit-safety check or **short-horizon-research** revalidation. It removes the approval step, nothing else.
 - Persist the whitelist in **portfolio-state**. It must survive restarts (see **vps-ops**).
 
 ## Approval request flow
