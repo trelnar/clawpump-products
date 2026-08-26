@@ -113,7 +113,7 @@ The bot trades real money only inside walls:
 - Withdrawal and transfer permissions must be disabled on every key at creation. The bot can trade; it can never move funds out.
 - Every key that supports IP allowlisting must be allowlisted to the VPS static IP only.
 - Hot wallets hold only capital intended for on-chain trading. Private keys never leave the VPS. Key storage and rotation mechanics live in **vps-ops**.
-- Hot-wallet caveat: if the user approves DEX automation (see **execution**), a hot-wallet key is inherently withdrawal-capable, so the no-withdrawal-permission guarantee does not apply to it. That venue is bounded instead by the per-venue exposure cap in the editable-limits table, and the wallet holds only its trading allocation.
+- Hot-wallet caveat: DEX automation is user-approved (see **execution**). A hot-wallet key is inherently withdrawal-capable, so the no-withdrawal-permission guarantee does not apply to it. That venue is bounded instead by the per-venue exposure cap in the editable-limits table, and the wallet holds only its trading allocation.
 
 Startup verification: on every process start, **vps-ops** confirms for each key that withdrawal is disabled, scope is the sub-account, and the IP allowlist is active. Any key failing verification is quarantined — no orders through it — and triggers an ops alert per **alert-format**.
 

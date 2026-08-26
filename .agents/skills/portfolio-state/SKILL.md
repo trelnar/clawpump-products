@@ -57,7 +57,7 @@ State persists in a local SQLite database on the VPS. It must survive process re
 
 Internal state and venue-reported state must match. State drift is a critical fault: acting on wrong balances breaks the 5% position limit and the 20% halt, so drift blocks buying until resolved.
 
-Poll every automatable venue (Coinbase Advanced Trade, approved equities APIs, and — only if the user approves DEX automation, per the **execution** routing table — on-chain wallet balances) and compare against internal cash and positions:
+Poll every automatable venue (Coinbase Advanced Trade, approved equities APIs, and on-chain wallet balances, per the **execution** routing table) and compare against internal cash and positions:
 
 | Trigger | Timing (editable — edit the table; it's plain Markdown) |
 |---|---|
@@ -145,7 +145,7 @@ On every process start — clean or after a crash — the bot must not trade unt
 
 1. Enter `SELL_ONLY` mode: no automatic buys; sells and exit management for known positions allowed once step 3 passes for the relevant venue.
 2. Rebuild: load the SQLite state, then replay any **trade-journal** entries newer than the last applied entry (fills, cancels, on-chain transactions that landed during downtime).
-3. Reconcile every venue against the rebuilt state, including open orders: adopt or cancel per the **execution** idempotency rules, and — only if the user approves DEX automation — check for on-chain transactions that landed while the bot was down.
+3. Reconcile every venue against the rebuilt state, including open orders: adopt or cancel per the **execution** idempotency rules, and check for on-chain transactions that landed while the bot was down.
 4. Recompute all marks and one fresh value series sample. Verify the series has no unexplained gap larger than the sampling interval; log any gap to **trade-journal**.
 5. Restore the prior halt state exactly. A crash must never clear `EMERGENCY_HALT`, `USER_STOP`, or `RECON_FREEZE`. Expire any pending approval codes whose expiry passed during downtime.
 6. Exit `SELL_ONLY` only when every venue reconciles clean. If any venue is unreachable, that venue stays `SELL_ONLY` (alert-only for buys) and an ops alert goes out per **alert-format**; other venues can resume independently.

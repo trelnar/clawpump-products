@@ -29,7 +29,7 @@ Run the current Ubuntu LTS release. Configure once, before the first live trade:
 
 - Store API keys and the SMS provider credentials in a root-readable-only env file (`/etc/tradebot/secrets.env`, owner `root:root`, mode `0600`, loaded via the systemd unit's `EnvironmentFile=`) or in a secrets manager. Never in the repo, never in **trade-journal**, never in logs, never in SMS.
 - Every exchange key must be scoped to the dedicated sub-account or wallet, must have withdrawal permission disabled, and must be IP-allowlisted to the VPS static address. Keys must never touch main balances.
-- Hot-wallet keys exist only if the user approves on-chain DEX automation, which is proposed, not yet approved (see **execution**). If approved, store the wallet key like any other secret — but a hot-wallet key is inherently withdrawal-capable, so the no-withdrawal-permission rule above applies to exchange keys only. The wallet is bounded by holding only its trading allocation, capped by the per-venue exposure limit in **risk-limits**.
+- On-chain DEX automation is user-approved (see **execution**). Store the hot-wallet key like any other secret — but a hot-wallet key is inherently withdrawal-capable, so the no-withdrawal-permission rule above applies to exchange keys only. The wallet is bounded by holding only its trading allocation, capped by the per-venue exposure limit in **risk-limits**.
 - On startup, query each venue for the key's permission set. If withdrawal is enabled, or the scope exceeds the sub-account, do not trade on that venue; run it alert-only and send an ops alert per **alert-format**.
 - Rotate any key immediately on suspicion of exposure, and on the schedule below. Rotation is a deploy: follow the deploy procedure.
 

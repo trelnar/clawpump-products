@@ -22,7 +22,7 @@ Route every order by asset class. This table is the routing authority. Edit the 
 | Venue | Asset class | Mode | Notes |
 |---|---|---|---|
 | Coinbase Advanced Trade | Crypto (listed pairs) | **Automated** | Primary automated crypto venue. Official API. |
-| On-chain DEX (via wallet) | New tokens, unlisted crypto | **Proposed — requires explicit user sign-off; alert-only until then** | Dedicated hot wallet only. See DEX swap rules. |
+| On-chain DEX (via wallet) | New tokens, unlisted crypto | **Automated** | Approved by user decision (2026-08-26). Dedicated hot wallet only — hot-wallet caveat in **risk-limits**. See DEX swap rules. |
 | E*TRADE | Equities | **Automated where API-approved** | Official API. Automation applies only to accounts with API access approved. |
 | Alpaca | Equities | **Recommended addition** | Official API. Preferred automated-equities venue if added. |
 | IBKR | Equities, advanced instruments | **Recommended addition** | Official API. Advanced instruments still require approval per **approval-gate**. |
@@ -94,7 +94,7 @@ Classify the asset by visible liquidity at order time. Edit the table; it's plai
 
 ### DEX swap rules (on-chain tokens)
 
-Applies only once the user approves DEX automation (see the routing table).
+DEX automation is user-approved (2026-08-26). Solana tokens only until **gatekeeper** covers other chains — an UNSUPPORTED verdict keeps the token alert-only (gate 4).
 
 - Set swap slippage tolerance to the tier cap, never higher.
 - Route swaps through an MEV-protected or private RPC. Never broadcast swaps above the public-mempool ceiling through a public mempool.
