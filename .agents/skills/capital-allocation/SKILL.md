@@ -34,7 +34,7 @@ A candidate is actionable only at a venue holding sufficient cash for the **risk
 
 ## Rebalance suggestions
 
-Suggest — by SMS, with exact amounts and direction — when any of these trigger:
+Suggest — by Telegram message, with exact amounts and direction — when any of these trigger:
 
 | Trigger (editable) | 
 |---|

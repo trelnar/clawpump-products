@@ -5,7 +5,7 @@ description: Use when logging any forecast, order, fill, approval, alert, risk r
 
 # Trade Journal
 
-This skill defines the append-only record of everything the bot predicted and everything it did. Every other skill writes here: **short-horizon-research** logs forecasts, **execution** logs orders and fills, **approval-gate** logs approvals and inbound SMS, **risk-limits** logs rejections, **portfolio-state** logs state transitions. The journal answers three questions at any time: what did the bot believe, what did it do, and what actually happened.
+This skill defines the append-only record of everything the bot predicted and everything it did. Every other skill writes here: **short-horizon-research** logs forecasts, **execution** logs orders and fills, **approval-gate** logs approvals and inbound messages, **risk-limits** logs rejections, **portfolio-state** logs state transitions. The journal answers three questions at any time: what did the bot believe, what did it do, and what actually happened.
 
 The journal is history. Current state lives in **portfolio-state** and must always be reconstructible from this journal plus venue APIs.
 
@@ -24,7 +24,7 @@ The journal is history. Current state lives in **portfolio-state** and must alwa
 |---|---|
 | **short-horizon-research** | Every forecast (fields below), every action-state change, missed-opportunity and false-positive findings, the raw discovery-stage signal stream — including signals that never produced a forecast |
 | **execution** | Order submissions, fills, partial fills, cancels, venue rejections, gate blocks, re-quotes, escalations, ticket downgrades to alert-only |
-| **approval-gate** | Approval requests, every inbound SMS (raw text, sender, parse result), approvals, rejections, expiries, invalid-code and unregistered-sender attempts, whitelist adds and revokes |
+| **approval-gate** | Approval requests, every inbound message and button callback (raw text, sender, parse result), approvals, rejections, expiries, invalid-code and unregistered-sender attempts, whitelist adds and revokes |
 | **risk-limits** | Every rejection: limit name, measured value, limit value; halt triggers; STOP and FLATTEN events |
 | **portfolio-state** | Halt-mode transitions, reconciliation results and adjustments, freezes, recovery sequences, cash flows |
 | **alert-format** | Every outbound alert: type, content, delivery status |
@@ -117,7 +117,7 @@ Also compute calibration conditioned on confidence: high-confidence miscalibrati
 
 ## On-demand reports
 
-The user can request reports by SMS. Command parsing and sender verification live in **approval-gate**; the `REPORT` family extends its command set. Reply formats live in **alert-format**. This skill assembles the content.
+The user can request reports by Telegram command. Command parsing and sender verification live in **approval-gate**; the `REPORT` family extends its command set. Reply formats live in **alert-format**. This skill assembles the content.
 
 | Command | Content |
 |---|---|

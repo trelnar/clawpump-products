@@ -17,7 +17,7 @@ The bot runs as two layers on the VPS. The split is the safety model: the agent 
 Rules:
 
 - The agent layer must never hold venue credentials or place orders. It emits action tickets (schema in **execution**); the core validates every ticket against **risk-limits** mechanically. Model output cannot bypass a rejection.
-- The core must never require a model call on the trade path. Mechanical exits, gate checks, approval handling, and SMS parsing run as code within the **execution** gate time budget.
+- The core must never require a model call on the trade path. Mechanical exits, gate checks, approval handling, and Telegram command parsing run as code within the **execution** gate time budget.
 - The core exposes read-only state (positions, cash, marks, freshness) to the agent layer. The agent reads; it does not write state directly.
 
 ## Scheduling

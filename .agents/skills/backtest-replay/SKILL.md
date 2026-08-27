@@ -131,4 +131,4 @@ On demotion: revert to the retained prior model immediately, log the demotion an
 
 ## Reporting
 
-After every replay comparison, shadow-period close, promotion, and demotion, write a summary to **trade-journal** `events` and send a short SMS via **alert-format**: model versions, primary metric for both models, sample sizes, and the action taken. Keep it scannable. Detail on demand.
+After every replay comparison, shadow-period close, promotion, and demotion, write a summary to **trade-journal** `events` and send a short Telegram message via **alert-format**: model versions, primary metric for both models, sample sizes, and the action taken. Keep it scannable. Detail on demand.

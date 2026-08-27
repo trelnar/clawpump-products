@@ -20,14 +20,14 @@ Run the current Ubuntu LTS release. Configure once, before the first live trade:
 |---|---|
 | Service user | Non-root user (`tradebot`), no sudo, no login shell needed. The bot process, state databases (**portfolio-state**, **trade-journal**), and logs live under this user |
 | SSH | Key authentication only: `PasswordAuthentication no`, `PermitRootLogin no` |
-| Firewall | Default deny inbound. Allow only the SSH port and HTTPS (443) for the inbound-SMS webhook (**approval-gate**). Restrict 443 to the SMS provider's published IP ranges when available. Outbound open for venue APIs, price feeds, monitor pings, and backups |
+| Firewall | Default deny inbound. Allow only the SSH port. Prefer Telegram long polling for inbound messages (**approval-gate**) — outbound only, no inbound port. If a webhook is used instead, allow HTTPS (443) restricted to Telegram's published IP ranges. Outbound open for venue APIs, price feeds, monitor pings, and backups |
 | fail2ban | Enabled on SSH |
 | Security updates | Unattended upgrades for the security pocket, with automatic reboot disabled. Kernel reboots are deploys — run them through the deploy procedure below |
 | Time | NTP sync via chrony or systemd-timesyncd. Clock accuracy is load-bearing: API request signing, approval-code expiry (**approval-gate**), and the rolling 24-hour window (**risk-limits**) all depend on it |
 
 ## Secrets
 
-- Store API keys and the SMS provider credentials in a root-readable-only env file (`/etc/tradebot/secrets.env`, owner `root:root`, mode `0600`, loaded via the systemd unit's `EnvironmentFile=`) or in a secrets manager. Never in the repo, never in **trade-journal**, never in logs, never in SMS.
+- Store API keys and the Telegram bot token in a root-readable-only env file (`/etc/tradebot/secrets.env`, owner `root:root`, mode `0600`, loaded via the systemd unit's `EnvironmentFile=`) or in a secrets manager. Never in the repo, never in **trade-journal**, never in logs, never in outbound messages.
 - Every exchange key must be scoped to the dedicated sub-account or wallet, must have withdrawal permission disabled, and must be IP-allowlisted to the VPS static address. Keys must never touch main balances.
 - On-chain DEX automation is user-approved (see **execution**). Store the hot-wallet key like any other secret — but a hot-wallet key is inherently withdrawal-capable, so the no-withdrawal-permission rule above applies to exchange keys only. The wallet is bounded by holding only its trading allocation, capped by the per-venue exposure limit in **risk-limits**.
 - On startup, query each venue for the key's permission set. If withdrawal is enabled, or the scope exceeds the sub-account, do not trade on that venue; run it alert-only and send an ops alert per **alert-format**.
@@ -45,7 +45,7 @@ Run the bot under systemd:
 | Unit | Purpose | Policy |
 |---|---|---|
 | `tradebot.service` | Main bot process | `User=tradebot`, `Restart=always`, `RestartSec=10`, `WatchdogSec=60` (the bot must notify the watchdog each main-loop cycle so a hung process is killed and restarted, not just a dead one) |
-| `tradebot-webhook.service` | Inbound-SMS webhook listener | Same restart policy. Can be part of the main process; a separate unit isolates webhook crashes |
+| `tradebot-inbound.service` | Inbound Telegram listener (long-poll loop or webhook) | Same restart policy. Can be part of the main process; a separate unit isolates listener crashes |
 | `tradebot-backup.timer` | Daily journal backup | See Backups |
 
 Rules:
@@ -58,8 +58,8 @@ Rules:
 The bot pings an external monitor (healthchecks.io or equivalent). The monitor — not the VPS — alerts when pings stop, so notification survives total host failure.
 
 - Ping only at the end of a completed, healthy main-loop cycle. A ping must prove the loop works, not that a timer fires.
-- Configure the monitor to send the user an SMS on a missed ping: `BOT OFFLINE — positions unmanaged`. This path must not depend on the VPS, the bot process, or credentials stored on the VPS.
-- Test the switch by stopping the service and confirming the SMS arrives.
+- Configure the monitor to notify the user on a missed ping through the monitor's own channel (its Telegram integration, push, or email): `BOT OFFLINE — positions unmanaged`. This path must not depend on the VPS, the bot process, or the bot's own Telegram token.
+- Test the switch by stopping the service and confirming the notification arrives.
 
 | Parameter | Default (editable) |
 |---|---|
@@ -131,17 +131,17 @@ Any change to decision logic — discovery, scoring, sizing, entry or exit rules
 
 ## Incident runbook
 
-Automatic actions fire without asking. Every incident logs to **trade-journal**. Ops SMS messages use **alert-format** with an `OPS:` prefix. Edit the table; it's plain Markdown.
+Automatic actions fire without asking. Every incident logs to **trade-journal**. Ops messages use **alert-format** with an `OPS:` prefix. Edit the table; it's plain Markdown.
 
-| Symptom | Automatic action | SMS to user |
+| Symptom | Automatic action | Message to user |
 |---|---|---|
 | Venue API errors sustained > 5 min | Pause buying on that venue; keep retrying sells per **execution**; other venues unaffected | `OPS: <venue> API down <duration>. Buying paused there. <n> positions on venue; exits retrying.` |
 | Venue recovers | Resume that venue after reconciliation passes | `OPS: <venue> restored. Reconciled clean. Buying resumed.` |
-| SMS webhook down (inbound probe fails) | Restart webhook unit. If still down 5 min: pause all automatic buying — the user's STOP path is broken | `OPS: Inbound SMS down. Buying paused until restored. Outbound alerts still work.` |
+| Inbound Telegram path down (poll loop dead or webhook probe fails) | Restart the listener unit. If still down 5 min: pause all automatic buying — the user's STOP path is broken | `OPS: Inbound Telegram down. Buying paused until restored. Outbound alerts still work.` |
 | Bot process down or hung; heartbeat missed | systemd restarts (cold start, `SELL_ONLY`). Monitor alerts independently | `BOT OFFLINE — positions unmanaged` (sent by the external monitor) |
-| Crash loop (>5 restarts / 10 min) | Service stays down | Same monitor SMS; user intervenes over SSH |
-| Reconciliation mismatch | `RECON_FREEZE` per **portfolio-state**: buying stops, sells continue | Discrepancy SMS per **portfolio-state**; re-alert every 30 min while unexplained |
-| Emergency halt (20% / 24 h) | Halt per **risk-limits**; resume only via **approval-gate** | Halt SMS per **risk-limits** with trigger values and resume instruction |
+| Crash loop (>5 restarts / 10 min) | Service stays down | Same monitor notification; user intervenes over SSH |
+| Reconciliation mismatch | `RECON_FREEZE` per **portfolio-state**: buying stops, sells continue | Discrepancy alert per **portfolio-state**; re-alert every 30 min while unexplained |
+| Emergency halt (20% / 24 h) | Halt per **risk-limits**; resume only via **approval-gate** | Halt alert per **risk-limits** with trigger values and resume instruction |
 | Feed stale / clock drift / disk critical | Pause buying per the watchdog table; auto-resume on clear | `OPS: <condition>. Buying paused. Sells unaffected.` |
 | Withdrawal permission found enabled on a key | Set that venue alert-only; place no orders with the key | `OPS: <venue> key has withdrawal enabled. Venue disabled. Rotate the key.` |
 | Backup failed 2 consecutive days | Keep retrying daily | `OPS: Journal backup failing since <date>. Last good backup <date>.` |

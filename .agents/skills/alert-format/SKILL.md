@@ -1,11 +1,11 @@
 ---
 name: alert-format
-description: Use when composing any outbound SMS — action alerts, approval requests, ops alerts, STATUS or REPORT replies, WHY replies — or when deciding whether a change is material enough to send at all.
+description: Use when composing any outbound Telegram message — action alerts, approval requests, ops alerts, STATUS or REPORT replies, WHY replies — or when deciding whether a change is material enough to send at all.
 ---
 
 # Alert Format
 
-This skill defines the wire format for every SMS the bot sends and the throttle rules that decide whether a message goes out. Content comes from other skills: recommendations from **short-horizon-research**, approval mechanics from **approval-gate**, state from **portfolio-state**, calibration from **trade-journal**, incidents from **vps-ops**, **execution**, and **risk-limits**. Writing style follows **docs-voice**. Transport (Twilio provisioning, webhooks, delivery monitoring) lives in **vps-ops**.
+This skill defines the wire format for every Telegram message the bot sends and the throttle rules that decide whether a message goes out. Content comes from other skills: recommendations from **short-horizon-research**, approval mechanics from **approval-gate**, state from **portfolio-state**, calibration from **trade-journal**, incidents from **vps-ops**, **execution**, and **risk-limits**. Writing style follows **docs-voice**. Transport (Telegram bot provisioning, polling or webhook, delivery monitoring) lives in **vps-ops**.
 
 Log every outbound message to **trade-journal**: kind, asset, full body, delivery status.
 
@@ -18,31 +18,32 @@ Log every outbound message to **trade-journal**: kind, asset, full body, deliver
 | Ops alert | `OPS:` | Never |
 | Command reply (`STATUS`, `REPORT`, `WHY`, confirmations, errors) | Named by command | No — always answer a command |
 
-## SMS constraints
+## Telegram constraints
 
 Every message must satisfy all of the following:
 
-- The first 160-character segment must carry the action, the asset, the current price, and the approval reply code when one is needed. Keep that content within the first 150 characters so it survives concatenation on every carrier.
-- Full detail can follow in the same message as additional segments. Never split one alert across separate messages.
-- Use GSM-7 characters only. Write `2x`, not `2×`; `-`, not `—`; `>=`, not `≥`; straight quotes only. One non-GSM character switches the message to UCS-2 and cuts segment capacity from 160 to 70.
+- One alert is one message (Telegram allows 4096 characters — length is rarely the constraint; scannability is). Never split one alert across separate messages.
+- Line 1 must carry the action, the asset, and the current price. The lock-screen notification preview shows roughly the first 100 characters; the decision must be readable from it.
+- Approval requests attach an inline keyboard: an `Approve` and a `Reject` button whose callback data carries the single-use code (**approval-gate**). A button tap is equivalent to the typed `YES <code>` / `NO <code>`; typed commands remain valid.
+- Keep the ASCII conventions: write `2x`, not `2×`; `-`, not `—`; `>=`, not `≥`; straight quotes. They read identically on every device and keep templates portable.
 - No greetings, sign-offs, emojis, markdown, or filler. Every line must change what the user knows or does.
 - Timestamps in UTC, 24-hour format.
 
 Length caps are editable defaults. Edit the table; it's plain Markdown.
 
-| Message class | Max segments |
+| Message class | Max lines |
 |---|---|
-| Action alert / approval request | 3 |
-| Ops alert | 1 |
-| STATUS reply | 3 |
-| REPORT reply | 4 |
-| WHY reply | 4 |
+| Action alert / approval request | 15 |
+| Ops alert | 2 |
+| STATUS reply | 25 |
+| REPORT reply | 30 |
+| WHY reply | 30 |
 
-When content exceeds the cap, drop fields from the bottom of the template up. Never drop the first line, probabilities, confidence, or a reply code.
+When content exceeds the cap, drop fields from the bottom of the template up. Never drop the first line, probabilities, confidence, or the approval buttons and code.
 
 ## Action alerts
 
-Lead with the action, then the asset, then the price — all on line 1. Use the field set from the **short-horizon-research** alert format, adapted for SMS:
+Lead with the action, then the asset, then the price — all on line 1. Use the field set from the **short-horizon-research** alert format, adapted for the message template:
 
 ```
 [ACTION] [ASSET/TICKER] @ [price]
@@ -81,7 +82,7 @@ P(2x): 12%  Conf: 79%
 
 ## Approval requests
 
-An approval request is an action alert plus the reply block from **approval-gate**. The single-use code must appear in the first 150 characters — put it on line 1.
+An approval request is an action alert plus the `Approve`/`Reject` inline buttons and the reply block from **approval-gate**. Put the single-use code on line 1 so the typed fallback works from the notification preview alone.
 
 ```
 BUY NOW BONK/SOL @ 0.0000142 - reply YES K7NR4T
@@ -115,7 +116,7 @@ OPS: <cause>. <action taken>. <what the user must do, if anything>.
 | Venue down | **vps-ops** | `OPS: Coinbase API down 7 min. Buying paused there; exits retrying. 2 positions on venue.` |
 | Order failure | **execution** | `OPS: SELL WIF order rejected 3x (insufficient liquidity). Retrying smaller clips. No action needed yet.` |
 
-Additional ops lines (key permission faults, SMS webhook down, backup failures, security events) are defined in **vps-ops** and **approval-gate** and use the same one-line format.
+Additional ops lines (key permission faults, inbound Telegram path down, backup failures, security events) are defined in **vps-ops** and **approval-gate** and use the same one-line format.
 
 ## STATUS reply
 
@@ -160,7 +161,7 @@ Invalidation: close below 0.0000131.
 Analogue: PEPE listing pattern 2023 - 2x in 31h median.
 ```
 
-Cap at the WHY segment limit. If the user asks again (`WHY <asset>` a second time within 1 h), send the next level of detail per the **docs-voice** detail-on-demand rule. An asset with no alert history in 7 days gets `No recent analysis: <asset>`.
+Cap at the WHY line limit. If the user asks again (`WHY <asset>` a second time within 1 h), send the next level of detail per the **docs-voice** detail-on-demand rule. An asset with no alert history in 7 days gets `No recent analysis: <asset>`.
 
 ## Throttle and dedupe
 

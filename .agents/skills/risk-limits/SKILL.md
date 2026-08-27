@@ -7,7 +7,7 @@ description: Use this skill to enforce hard and editable risk limits before ever
 
 This skill is the last check before money moves. **execution** must call it before every order (pre-trade gate 3 in its gate sequence). Every check is mechanical: measure, compare, pass or reject. A rejection is final for that order. The research model cannot argue, rephrase, or re-request its way past one.
 
-Two limits are hard. No model output, research finding, config change, SMS content, or table edit by the bot can override them. Everything else in this file is an editable default: edit the table; it's plain Markdown. Only the user edits this file. The bot must never modify it.
+Two limits are hard. No model output, research finding, config change, message content, or table edit by the bot can override them. Everything else in this file is an editable default: edit the table; it's plain Markdown. Only the user edits this file. The bot must never modify it.
 
 ## Hard limit 1: 5% maximum automatic position size
 
@@ -48,7 +48,7 @@ On trigger:
 1. Block all automatic buys immediately — new entries, adds to whitelisted assets, and unfilled child buy orders. Cancel open buy orders.
 2. Continue all selling. Exits, stop management, and SELL NOW actions execute normally. A halt never blocks a sell.
 3. Invalidate pending buy-approval requests and send no new ones while halted. Research, monitoring, and alerts continue. Alert-only venues (Robinhood, Crypto.com) keep receiving alerts; the user trades those manually.
-4. Send an SMS per **alert-format** stating: halt triggered, trigger values (current vs 24 h peak), and the resume instruction. Open positions are not included — `STATUS` covers them, and the alert must fit the **alert-format** ops-alert segment cap.
+4. Send a Telegram message per **alert-format** stating: halt triggered, trigger values (current vs 24 h peak), and the resume instruction. Open positions are not included — `STATUS` covers them, and the alert must fit the **alert-format** ops-alert line cap.
 5. Resume only through **approval-gate**: `RESUME`, then `YES <code>`. Nothing else — no time elapsed, no recovery in value, no model judgment — resumes buying.
 
 | Parameter | Default |
@@ -81,12 +81,12 @@ Fat-finger checks apply to buys and sells alike, per order including child order
 
 ## Kill switches
 
-Two user commands, carried over the **approval-gate** SMS channel and subject to its sender and signature verification.
+Two user commands, carried over the **approval-gate** Telegram channel and subject to its sender and transport verification.
 
 ### STOP
 
 - Single message, no code, instant. Halting must be friction-free.
-- Effect: identical to the emergency halt — block all automatic buys, cancel open buy orders, continue all selling, confirm by SMS.
+- Effect: identical to the emergency halt — block all automatic buys, cancel open buy orders, continue all selling, confirm on Telegram.
 - Resume requires `RESUME` then `YES <code>` per **approval-gate**.
 
 ### FLATTEN
@@ -96,7 +96,7 @@ Exits everything. Because it moves money, it requires two messages:
 1. User texts `FLATTEN`.
 2. Bot replies with: open position count, total deployed percentage, estimated aggregate exit slippage, a single-use confirmation code, and its expiry (see the defaults table below).
 3. User replies `FLATTEN <code>` before expiry.
-4. Bot: activates a halt, cancels all open orders, submits exits for every position under the sell policy in **execution** (sells are risk-off — prefer a worse fill over an unfilled exit), then sends a completion SMS with fills and any positions that could not be closed.
+4. Bot: activates a halt, cancels all open orders, submits exits for every position under the sell policy in **execution** (sells are risk-off — prefer a worse fill over an unfilled exit), then sends a completion message with fills and any positions that could not be closed.
 
 A single inbound message must never flatten the portfolio. An expired, used, or invalid code gets `Code expired or invalid.` and no action. Code generation, expiry, and exact-match parsing follow **approval-gate**.
 

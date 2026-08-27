@@ -78,7 +78,7 @@ Discrepancy tolerances (editable). A difference within tolerance auto-adjusts in
 On any discrepancy beyond tolerance:
 
 1. Set halt mode `RECON_FREEZE`. All automatic buying stops immediately. Selling and exit management continue.
-2. Send an SMS ops alert per **alert-format**: venue, asset or currency, internal value, venue value, and last matching journal entry.
+2. Send an ops alert per **alert-format**: venue, asset or currency, internal value, venue value, and last matching journal entry.
 3. Attempt to explain the difference from **trade-journal** and venue history: an unrecorded fill, a landed on-chain transaction, a fee, a deposit or withdrawal. If fully explained, adopt the venue value, record the explanation in `reconciliations`, log to **trade-journal**, and clear the freeze.
 4. If unexplained, stay frozen. Re-alert at the interval in the trigger table above. Clearing an unexplained freeze requires explicit user approval via **approval-gate**.
 

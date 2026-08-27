@@ -13,7 +13,7 @@ Verification checklist. All items must pass:
 
 - [ ] Keys scoped to dedicated sub-accounts; withdrawal disabled; IP-locked (**risk-limits** startup verification passes)
 - [ ] Hot wallet funded with allocation + gas floor (**capital-allocation**)
-- [ ] SMS round trip: bot sends a code, user replies, bot confirms parse (**approval-gate**)
+- [ ] Telegram round trip: bot sends an approval request; the user taps a button AND sends one typed command; bot confirms both parse (**approval-gate**)
 - [ ] STOP and RESUME drill completes
 - [ ] FLATTEN wiring check (dry: confirm code flow, no positions to flatten)
 - [ ] Dead-man's switch fires when the heartbeat is paused (**vps-ops**)
@@ -46,11 +46,11 @@ Position sizes step through 25% → 50% → 100% of **risk-limits**-computed siz
 | Unexplained reconciliation breaks | 0 |
 | Missed mechanical exits | 0 |
 | Orphan orders (unknown to **portfolio-state**) | 0 |
-| SMS approval round trip | Under 2 min median |
+| Approval round trip | Under 2 min median |
 
 ## Advancement and regression
 
-- The bot requests each phase or step advance with an **approval-gate** code; the user confirms by SMS. The bot never self-promotes.
+- The bot requests each phase or step advance with an **approval-gate** code; the user confirms on Telegram. The bot never self-promotes.
 - Any critical incident — unexplained break, missed mechanical exit, orphan order — drops one step automatically, alerts, and restarts that step's clock.
 - Later, changed core enforcement code that touches order placement re-enters the ramp at reduced size (**runtime** deployment rules); agent-layer decision changes go through **backtest-replay** shadow mode instead.
 

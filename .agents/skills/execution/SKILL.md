@@ -34,7 +34,7 @@ Official APIs only, on every venue, present or future: the bot places orders onl
 Rules:
 
 - The bot must never automate Robinhood or Crypto.com through unofficial, scraped, or reverse-engineered APIs. No exceptions.
-- For alert-only venues, send a manual-execution SMS formatted per **alert-format** and stop. The user executes by hand.
+- For alert-only venues, send a manual-execution alert formatted per **alert-format** and stop. The user executes by hand.
 - If an asset is tradable on multiple automated venues, prefer the venue with the deepest liquidity for that asset.
 - If no automated venue can trade the asset, downgrade the ticket to an alert and log it.
 
@@ -48,9 +48,9 @@ Every order must pass all applicable gates, in this order, immediately before su
 | 2 | Stale data | All orders | Quote and research data no older than the stale-data limit (table below). Otherwise re-quote before proceeding. |
 | 3 | Risk limits | Buys and adds | **risk-limits** confirms the order keeps the position at or under 5% of total trading portfolio value and violates no other hard limit. |
 | 4 | Exit safety | Token buys and adds | A read-only exit-safety check, fresh within the freshness window (table below): a simulated sell of the intended position notional succeeds, transfer tax is at or under the cap, and the pool or book is deep enough to exit the full position within the liquidity-based cap in **risk-limits**. Cannot-sell, tax over cap, or insufficient exit depth blocks the buy. Nothing else does: age, holder counts, hype, and token quality are never rejection criteria — risk is modeled by **short-horizon-research**, not vetoed here. |
-| 5 | Approval gate | First-time buys; advanced-instrument opens | **approval-gate** shows the asset whitelisted, or an explicit SMS approval for this ticket. Approval is required to open an advanced-instrument position (options, leverage, shorts, futures, perps) — every time, never whitelist-able. Closing, reducing, or exiting an existing advanced position is an exit: automatic, never gated on approval. |
+| 5 | Approval gate | First-time buys; advanced-instrument opens | **approval-gate** shows the asset whitelisted, or an explicit Telegram approval for this ticket. Approval is required to open an advanced-instrument position (options, leverage, shorts, futures, perps) — every time, never whitelist-able. Closing, reducing, or exiting an existing advanced position is an exit: automatic, never gated on approval. |
 
-Blocked-buy notification: when a BUY NOW ticket for an already-alerted asset is blocked by gates 3–5, send a short SMS naming the blocking gate and the measured value (example: `NOT BOUGHT <asset>: exit-safety, sell-sim failed`) so the user can act manually or adjust editable thresholds deliberately.
+Blocked-buy notification: when a BUY NOW ticket for an already-alerted asset is blocked by gates 3–5, send a short message naming the blocking gate and the measured value (example: `NOT BOUGHT <asset>: exit-safety, sell-sim failed`) so the user can act manually or adjust editable thresholds deliberately.
 
 Gate timing defaults. Edit the table; it's plain Markdown.
 
@@ -62,7 +62,7 @@ Gate timing defaults. Edit the table; it's plain Markdown.
 | Max quote age at submission | 5 seconds (crypto), 10 seconds (equities) |
 | Max research-timestamp age for BUY NOW | 15 minutes; older tickets return to **short-horizon-research** for revalidation |
 
-Approval reminders (binding, from **approval-gate**): the first buy of a non-whitelisted asset requires SMS approval, and approval whitelists the asset. Adds to whitelisted assets, holds, and all sells execute automatically. Resuming automatic buying after an emergency halt requires explicit SMS approval.
+Approval reminders (binding, from **approval-gate**): the first buy of a non-whitelisted asset requires Telegram approval, and approval whitelists the asset. Adds to whitelisted assets, holds, and all sells execute automatically. Resuming automatic buying after an emergency halt requires explicit Telegram approval.
 
 ## Order policy
 
@@ -153,7 +153,7 @@ Crypto executes 24/7. Equities follow these rules:
 - Extended hours: limit orders only, slippage cap halved, no sell escalation to market orders.
 - Never submit a market order outside RTH.
 - Do not queue a BUY NOW ticket overnight. The signal is perishable. Return the ticket to **short-horizon-research** for revalidation at the next session open.
-- A SELL NOW ticket outside all trading sessions triggers an immediate SMS alert per **alert-format**, then executes at the next session open if the exit condition still holds.
+- A SELL NOW ticket outside all trading sessions triggers an immediate alert per **alert-format**, then executes at the next session open if the exit condition still holds.
 
 ## Failure handling
 
@@ -166,7 +166,7 @@ Crypto executes 24/7. Equities follow these rules:
 | Unconfirmable order state | Follow the idempotency procedure above. |
 | Position mismatch vs **portfolio-state** | Stop submitting and trigger **portfolio-state** reconciliation. On a confirmed beyond-tolerance discrepancy, **portfolio-state** sets RECON_FREEZE (all automatic buying stops immediately) and alerts immediately. |
 
-Escalate ops alerts by SMS using **alert-format**. An ops alert must state: what failed, current position state, and what manual action (if any) the user should take. Host-level failures (process down, clock drift, disk) are handled by **vps-ops**.
+Escalate ops alerts by Telegram message using **alert-format**. An ops alert must state: what failed, current position state, and what manual action (if any) the user should take. Host-level failures (process down, clock drift, disk) are handled by **vps-ops**.
 
 ## Journaling
 

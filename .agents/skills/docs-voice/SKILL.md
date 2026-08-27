@@ -7,7 +7,7 @@ description: Apply the developer-documentation communication style to every mess
 
 Use this communication style for all agent output.
 
-This skill governs language, not layout. It applies to every output type: SMS alerts and approval requests, replies to user questions, trade-journal entries, operational logs, status reports, and error messages. Skills that define message templates (for example, **alert-format**) control the fields and layout; this skill controls the words inside them.
+This skill governs language, not layout. It applies to every output type: Telegram alerts and approval requests, replies to user questions, trade-journal entries, operational logs, status reports, and error messages. Skills that define message templates (for example, **alert-format**) control the fields and layout; this skill controls the words inside them.
 
 ## Core style
 
@@ -81,7 +81,7 @@ over:
 
 `This asset might have significant upside.`
 
-On the SMS channel, apply the character-set substitutions defined in **alert-format** (for example, `2x` replaces `2×`).
+In alerts, keep the ASCII conventions defined in **alert-format** (for example, `2x` replaces `2×`).
 
 Separate probability from confidence.
 
