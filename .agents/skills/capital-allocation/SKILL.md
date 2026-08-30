@@ -13,20 +13,22 @@ Percentages of total trading capital — the amount itself is set by the user an
 
 | Venue | Target allocation (editable) | Cash floor (editable) |
 |---|---|---|
-| Hot wallets (on-chain, all chains) | 45% | 10% of venue allocation |
-| Coinbase (sub-account) | 25% | 10% of venue allocation |
-| Equities venue | 25% | 10% of venue allocation |
-| Unallocated reserve | 5% | — |
+| Hot wallets (on-chain, all chains) | 60% | 10% of venue allocation |
+| Coinbase (sub-account) | 30% | 10% of venue allocation |
+| Unallocated reserve | 10% | — |
+| Equities venue | 0% until total capital supports it | — |
+
+Equities is unfunded below an editable capital threshold (default $25,000): under it, PDT limits day trades to 3 per 5 business days and the 5% position cap produces positions too small to reach the 2x objective. Raise the equities row when the account clears the threshold.
 
 On-chain capital splits across the enabled chains in the **execution** chain registry. Hold trading capital as the chain's stablecoin (USDC where available) rather than the native token, so an idle balance does not carry native-token price risk.
 
 | Chain | Share of on-chain allocation (editable) |
 |---|---|
-| Solana | 45% |
-| Base | 25% |
-| BNB Chain | 15% |
-| Arbitrum | 10% |
-| Ethereum mainnet | 5% |
+| Solana | 65% |
+| Base | 35% |
+| BNB Chain | Dormant — fund when a candidate justifies it |
+| Arbitrum | Dormant — fund when a candidate justifies it |
+| Ethereum mainnet | Dormant — the gas-aware minimum in **execution** rarely clears under the 5% cap at small account sizes |
 
 The reserve buffers adds, fees, and gas top-ups. **risk-limits** per-venue exposure caps apply on top of allocation targets.
 
