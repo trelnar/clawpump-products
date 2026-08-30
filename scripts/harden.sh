@@ -28,7 +28,7 @@ touch /etc/tradebot/secrets.env
 chmod 0600 /etc/tradebot/secrets.env
 
 # --- ssh: keys only, no passwords, no root login ----------------------------
-cat > /etc/ssh/sshd_config.d/99-tradebot.conf <<'EOF'
+cat > /etc/ssh/sshd_config.d/00-tradebot.conf <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
