@@ -14,8 +14,8 @@ Example providers are illustrative — swap for what you subscribe to. Edit the 
 | Feed class | Purpose | Example source | Mode | Latency budget |
 |---|---|---|---|---|
 | Exchange market data | Prices, books for listed crypto | Coinbase Advanced Trade WebSocket | Stream | < 1 s |
-| Pool depth / DEX state | Token prices, liquidity, swaps | On-chain RPC + an indexer (e.g. a Solana indexer API) | Stream + poll | < 2 s |
-| New-token launches | Discovery of just-created pools | DEX factory / launchpad event streams | Stream | < 5 s |
+| Pool depth / DEX state | Token prices, liquidity, swaps | Per-chain RPC + indexer, one set per enabled chain in the **execution** chain registry | Stream + poll | < 2 s |
+| New-token launches | Discovery of just-created pools | DEX factory and launchpad event streams, per enabled chain | Stream | < 5 s |
 | On-chain activity | Wallet flows, holder changes, smart money | Indexer APIs | Poll | < 60 s |
 | Social / attention | Mention acceleration, narrative formation | Platform APIs (e.g. X API), forum APIs | Poll | < 60 s |
 | Search trends | Search acceleration | Trends API | Poll | < 15 min |
@@ -24,6 +24,8 @@ Example providers are illustrative — swap for what you subscribe to. Edit the 
 | Equities auxiliary | Short interest, options flow, SSR lists | Data vendor APIs | Poll | < 15 min |
 
 Official, documented APIs only — the same rule as **execution**. No scraping around a rate limit.
+
+Each enabled chain needs its own RPC, indexer, and launch stream. A chain whose data feeds are down loses its fourth capability and its tokens fall back to alert-only per the **execution** chain registry — the rest of the registry keeps trading.
 
 ## Priority
 

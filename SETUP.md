@@ -29,11 +29,16 @@ One-time setup, in order. Skills referenced live in `.agents/skills/`.
 - [ ] E*TRADE: developer.etrade.com → accept API agreement → request production key (days–weeks; tokens need daily manual renewal)
 - [ ] In parallel: open an **Alpaca** account (instant keys, built for automation) and fund it as the primary automated equities venue
 
-## 5. Hot wallet (~10 min, on the VPS)
+## 5. Hot wallets (~15 min, on the VPS)
+
+Two keypairs cover every chain: one Solana, one EVM. The EVM key yields the same address on Base, BNB Chain, Arbitrum, and Ethereum.
 
 - [ ] Generate a **fresh** Solana keypair on the VPS (`solana-keygen new`) — never reuse a personal wallet
-- [ ] Fund allocation + SOL gas floor (`capital-allocation`)
-- [ ] Keyfile at mode `0600` in the secrets directory
+- [ ] Generate a **fresh** EVM keypair on the VPS — never reuse a personal wallet
+- [ ] Both keyfiles at mode `0600` in `/etc/tradebot/`
+- [ ] Fund per-chain allocations, held as USDC where available (`capital-allocation`)
+- [ ] Fund each chain's native gas float: SOL; ETH on Base/Arbitrum/Ethereum; BNB on BNB Chain
+- [ ] Confirm an RPC endpoint and router for each enabled chain (`execution` chain registry)
 
 ## 6. Capital
 

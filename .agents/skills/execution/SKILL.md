@@ -22,7 +22,7 @@ Route every order by asset class. This table is the routing authority. Edit the 
 | Venue | Asset class | Mode | Notes |
 |---|---|---|---|
 | Coinbase Advanced Trade | Crypto (listed pairs) | **Automated** | Primary automated crypto venue. Official API. |
-| On-chain DEX (via wallet) | New tokens, unlisted crypto | **Automated** | Approved by user decision (2026-08-26). Dedicated hot wallet only — hot-wallet caveat in **risk-limits**. See DEX swap rules. |
+| On-chain DEX (via wallet) | New tokens, unlisted crypto | **Automated** | Approved by user decision (2026-08-26). Any chain in the chain registry below. Dedicated hot wallets only — hot-wallet caveat in **risk-limits**. See DEX swap rules. |
 | E*TRADE | Equities | **Automated where API-approved** | Official API. Automation applies only to accounts with API access approved. |
 | Alpaca | Equities | **Recommended addition** | Official API. Preferred automated-equities venue if added. |
 | IBKR | Equities, advanced instruments | **Recommended addition** | Official API. Advanced instruments still require approval per **approval-gate**. |
@@ -94,9 +94,42 @@ Classify the asset by visible liquidity at order time. Edit the table; it's plai
 | Max child orders per ticket | 5 |
 | Min spacing between child orders | 20 seconds |
 
+### Chain registry
+
+No chain is excluded by policy. A chain is tradeable when all four capabilities exist; otherwise its tokens are alert-only. Gas cost sets the minimum viable position, not eligibility — an expensive chain needs a bigger position, not a ban.
+
+Required capabilities per chain:
+
+1. Price and pool-depth data (**market-data**)
+2. A swap router or aggregator with an official API
+3. An exit-safety check: simulated sell, transfer-tax read, exit-depth read
+4. A funded gas float (**capital-allocation**)
+
+| Chain | Type | Status (editable) | Notes |
+|---|---|---|---|
+| Solana | Non-EVM | **Enabled** | Highest new-token velocity; sub-cent fees |
+| Base | EVM | **Enabled** | High velocity, low fees |
+| BNB Chain | EVM | **Enabled** | High launch volume |
+| Arbitrum | EVM | **Enabled** | Low fees |
+| Ethereum mainnet | EVM | **Enabled** | Gas-gated: only positions clearing the round-trip cost test below |
+| Any other chain | — | **Add when the four capabilities exist** | Adding a chain is a table entry plus config, not new logic |
+
+All EVM chains share one wallet keypair and one address. Adding an EVM chain means adding an RPC endpoint, a router address, and a gas float — no new key, no new code path.
+
+### Gas-aware minimum position
+
+Before any on-chain buy, estimate the round-trip cost: entry gas + exit gas + both swap fees + estimated slippage both ways.
+
+| Rule | Default (editable) |
+|---|---|
+| Max round-trip cost as share of position notional | 3% |
+| Behavior when exceeded | Increase the position to clear the threshold if **risk-limits** allows it; otherwise downgrade the ticket to alert-only, naming the cost |
+
+This rule is what makes an expensive chain self-regulating: on Ethereum it demands a larger position, on Solana it almost never binds.
+
 ### DEX swap rules (on-chain tokens)
 
-DEX automation is user-approved (2026-08-26).
+DEX automation is user-approved (2026-08-26). These rules apply to every chain in the registry.
 
 - Set swap slippage tolerance to the tier cap, never higher.
 - Route swaps through an MEV-protected or private RPC. Never broadcast swaps above the public-mempool ceiling through a public mempool.

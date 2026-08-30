@@ -13,16 +13,30 @@ Percentages of total trading capital — the amount itself is set by the user an
 
 | Venue | Target allocation (editable) | Cash floor (editable) |
 |---|---|---|
-| Coinbase (sub-account) | 40% | 10% of venue allocation |
-| Hot wallet (on-chain) | 30% | 10% of venue allocation |
+| Hot wallets (on-chain, all chains) | 45% | 10% of venue allocation |
+| Coinbase (sub-account) | 25% | 10% of venue allocation |
 | Equities venue | 25% | 10% of venue allocation |
 | Unallocated reserve | 5% | — |
+
+On-chain capital splits across the enabled chains in the **execution** chain registry. Hold trading capital as the chain's stablecoin (USDC where available) rather than the native token, so an idle balance does not carry native-token price risk.
+
+| Chain | Share of on-chain allocation (editable) |
+|---|---|
+| Solana | 45% |
+| Base | 25% |
+| BNB Chain | 15% |
+| Arbitrum | 10% |
+| Ethereum mainnet | 5% |
 
 The reserve buffers adds, fees, and gas top-ups. **risk-limits** per-venue exposure caps apply on top of allocation targets.
 
 ## Gas floors
 
-The hot wallet must always hold enough native token (e.g. SOL) to execute an editable number of exits (default: 20) at current fee levels. Running out of gas while holding positions is an incident: ops alert, and **position-monitor** treats affected positions as exit-impaired until the user tops up.
+Every enabled chain must hold enough of its native gas token to execute an editable number of exits (default: 20) at current fee levels — SOL on Solana, ETH on Base, Arbitrum, and Ethereum, BNB on BNB Chain. The floor is measured per chain, never pooled: gas on Base cannot fund an exit on Solana.
+
+Running out of gas while holding positions is an incident: ops alert, and **position-monitor** treats affected positions on that chain as exit-impaired until the user tops up. A chain below its gas floor accepts no new buys; exits on it continue while gas remains.
+
+Because a gas float is idle capital, an enabled chain with no position and no gas float is dormant rather than broken — the first buy on it is blocked with a top-up suggestion, not silently skipped.
 
 ## The buy constraint
 

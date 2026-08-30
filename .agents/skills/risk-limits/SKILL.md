@@ -69,6 +69,7 @@ These limits apply in addition to the hard limits. **execution** checks each app
 | Correlated-exposure cap | 15% of total portfolio value per group | Sum of cost basis of positions in the same correlation group after the proposed order |
 | Advanced-instrument notional cap | 10% of total portfolio value per position | Effective notional exposure — leverage × cost basis — of the advanced-instrument position after the proposed order |
 | Per-venue exposure cap | 50% of total portfolio value per venue | Sum of cost basis of positions held at one venue or in one hot wallet after the proposed order |
+| Per-chain exposure cap | 30% of total portfolio value per chain | Sum of cost basis of on-chain positions on one chain after the proposed order; a chain outage or bridge failure must not strand more than this |
 | Liquidity-based position cap | Full position exitable within 2× the tier slippage cap | Estimated exit slippage for the entire position, using pool depth measured by **execution**'s exit-safety check for tokens and visible order-book depth otherwise, against the liquidity tiers in **execution** |
 | Fat-finger: max single-order notional | 2.5% of total portfolio value | Order notional at limit price |
 | Fat-finger: max price deviation | 5% from reference price | Limit price vs an independent reference quote (mid or last trade) fetched at check time |
