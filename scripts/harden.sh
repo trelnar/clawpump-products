@@ -14,7 +14,7 @@ apt-get -y install ufw fail2ban unattended-upgrades chrony curl git jq sqlite3
 
 # --- service user -----------------------------------------------------------
 id -u "$BOT_USER" >/dev/null 2>&1 || adduser --disabled-password --gecos "" "$BOT_USER"
-usermod -aG sudo "$BOT_USER"
+# No sudo for the service user: admin happens as root over SSH key; bot only runs code.
 install -d -m 0700 -o "$BOT_USER" -g "$BOT_USER" "/home/$BOT_USER/.ssh"
 # Carry over any key added at deploy time so the bot user is reachable too.
 if [ -f /root/.ssh/authorized_keys ]; then
