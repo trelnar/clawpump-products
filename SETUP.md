@@ -47,3 +47,16 @@ Two keypairs cover every chain: one Solana, one EVM. The EVM key yields the same
 - [ ] Decide the total
 - [ ] Split per the `capital-allocation` table; fund each venue
 - [ ] Then run the `go-live` Phase 0 checklist
+
+## 7. Deploy the bot (VPS, as root)
+
+```
+curl -fsSL https://raw.githubusercontent.com/trelnar/clawpump-products/claude/trading-bot-skills-sfqmfo/scripts/deploy.sh | bash
+```
+
+- [ ] Fill `/etc/tradebot/secrets.env` (Telegram token, healthchecks URL, Coinbase key+secret, Anthropic API key)
+- [ ] Fund the printed wallet addresses ($390 USDC-Solana + SOL gas; $210 USDC-Base + ETH gas)
+- [ ] `systemctl start tradebot-core`
+- [ ] Run `scripts/phase0.py` as bot; all checks pass
+- [ ] STOP/RESUME drill, FLATTEN drill, 48h clean run
+- [ ] Approve phase advance; `systemctl start tradebot-agent`

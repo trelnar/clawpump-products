@@ -1,0 +1,7 @@
+anthropic>=1.0
+requests>=2.32
+coinbase-advanced-py>=1.8
+solders>=0.21
+base58>=2.1
+eth-account>=0.13
+web3>=7.6

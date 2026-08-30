@@ -1,0 +1,22 @@
+[Unit]
+Description=Trading bot deterministic core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+EnvironmentFile=/etc/tradebot/secrets.env
+Environment=TRADEBOT_SKILLS=/opt/tradebot/.agents/skills
+WorkingDirectory=/opt/tradebot/bot
+ExecStart=/opt/tradebot/venv/bin/python -m tradebot.core
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tradebot
+
+[Install]
+WantedBy=multi-user.target
