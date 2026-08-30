@@ -78,8 +78,8 @@ def compute_size(total_value):
 def check_halt(current_value):
     """Hard limit 2: flow-adjusted current value <= 80% of trailing-24h max."""
     peak = state.trailing_max(config.HALT_WINDOW_SEC)
-    if peak is None or current_value is None:
-        return False
+    if peak is None or peak <= 0 or current_value is None:
+        return False  # no meaningful peak established; a $0 portfolio cannot draw down
     if current_value <= (1 - config.HALT_DRAWDOWN_PCT) * peak:
         if state.get_mode() == "NORMAL":
             state.set_mode("EMERGENCY_HALT",

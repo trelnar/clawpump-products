@@ -32,11 +32,32 @@ def check_positions():
                     state.set_kv(f"reeval:{asset}", str(time.time()))
 
 
+_last_recon = [0.0]
+
+
+def reconcile_cash():
+    """portfolio-state reconciliation (v1): pull venue balances into the cash
+    table. Per-venue failures are logged, never fatal."""
+    from .exchanges import coinbase, evm_dex, solana_dex
+    for venue, fn in (("coinbase", coinbase.usdc_balance),
+                      ("solana", solana_dex.usdc_balance),
+                      ("base", evm_dex.usdc_balance)):
+        try:
+            state.set_cash(venue, fn())
+        except Exception as e:
+            journal.log_event("recon_fetch_fail", detail=f"{venue}: {e}")
+
+
 def portfolio_tick():
     """Sample flow-adjusted value; run the halt check; expire approvals."""
+    if time.time() - _last_recon[0] >= config.RECON_INTERVAL_SEC or _last_recon[0] == 0:
+        reconcile_cash()
+        _last_recon[0] = time.time()
     assets = [p["asset_id"] for p in state.positions()]
     marks, fresh = marketdata.marks(assets)
     value = state.total_value(marks) if fresh or not assets else None
+    if value is not None and value <= 0:
+        value = None  # uninitialized or all-fetch-failed; never sample $0 as real
     if value is not None:
         state.sample_value(value)
         from . import risk
