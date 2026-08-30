@@ -2,8 +2,11 @@
 
 One-time setup, in order. Skills referenced live in `.agents/skills/`.
 
+**Server IP (for API allowlists):** `107.191.39.195`
+
 ## 1. Telegram bot (~5 min)
 
+- [x] Telegram user ID: `6674587758`
 - [ ] Message **@BotFather** → `/newbot` → pick a name and username → copy the **bot token**
 - [ ] Open your new bot's chat and press **Start**
 - [ ] Message **@userinfobot** → note your numeric **user ID**
@@ -11,18 +14,17 @@ One-time setup, in order. Skills referenced live in `.agents/skills/`.
 
 ## 2. VPS (~30 min)
 
-- [ ] Provider: Hetzner / DigitalOcean / Vultr; ~2 vCPU / 4 GB; US region
-- [ ] Ubuntu 24.04 LTS, SSH key added at creation
-- [ ] Harden per `vps-ops`: non-root user, ufw (SSH only), fail2ban, unattended upgrades, NTP
-- [ ] Note the static IP for exchange key allowlists
+- [x] Vultr `vhp-2c-4gb-amd`, New York (NJ), Ubuntu 24.04 LTS
+- [x] Hardened at first boot via the `harden` startup script (`scripts/harden.sh`) — verified `/etc/tradebot/.harden-ok`
+- [x] Static IP noted: `107.191.39.195`
+- [ ] Add your Mac SSH key (console → `/home/bot/.ssh/authorized_keys`), then SSH in as `bot`
 - [ ] healthchecks.io: create one check, note the ping URL, set its own Telegram/email notification (dead-man's switch)
 
 ## 3. Coinbase (~15 min)
 
-- [ ] Create a dedicated **portfolio** (e.g. "Bot") in Advanced Trade
-- [ ] Move the bot's trading capital into it
-- [ ] API key scoped to that portfolio: **View + Trade only — no Transfer** — IP-allowlisted to the VPS
-- [ ] Save key + secret for the secrets file
+- [x] Dedicated portfolio created: **HypeBot**
+- [x] API key `HypeBot-API` — View + Trade only, no Transfer/Receive, Ed25519, IP-allowlisted to the VPS; saved to password manager
+- [ ] Fund the portfolio (25% of total trading capital)
 
 ## 4. Equities API (start now — slowest item)
 
