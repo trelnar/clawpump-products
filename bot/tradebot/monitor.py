@@ -51,7 +51,12 @@ def reconcile_cash():
 def portfolio_tick():
     """Sample flow-adjusted value; run the halt check; expire approvals."""
     if time.time() - _last_recon[0] >= config.RECON_INTERVAL_SEC or _last_recon[0] == 0:
-        reconcile_cash()
+        import threading
+        w = threading.Thread(target=reconcile_cash, daemon=True)
+        w.start()
+        w.join(timeout=45)
+        if w.is_alive():
+            journal.log_event("recon_timeout", detail="venue call exceeded 45s; loop continues")
         _last_recon[0] = time.time()
     assets = [p["asset_id"] for p in state.positions()]
     marks, fresh = marketdata.marks(assets)

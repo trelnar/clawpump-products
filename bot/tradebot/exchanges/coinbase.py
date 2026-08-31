@@ -12,7 +12,8 @@ def client():
     if _client is None:
         from coinbase.rest import RESTClient
         _client = RESTClient(api_key=config.COINBASE_API_KEY,
-                             api_secret=config.COINBASE_API_SECRET)
+                             api_secret=config.COINBASE_API_SECRET,
+                             timeout=10)  # a hung call must never freeze the core loop
     return _client
 
 
