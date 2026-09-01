@@ -87,6 +87,13 @@ class Commands:
                                  raw_text=raw, sender=None, asset_id=None)
             alerts.ops(f"Code {code} is not live.")
             return
+        if p["kind"] == "buy" and state.get_mode() != "NORMAL":
+            # Do not consume the code: RESUME, then this same YES still works.
+            journal.log_approval(code=code, asset_id=p["asset_id"], kind="buy",
+                                 event="blocked_halt", raw_text=raw, sender=None)
+            alerts.ops(f"Not buying {p['asset_id']}: mode is {state.get_mode()}. "
+                       f"RESUME first, then send YES {code} again.")
+            return
         state.resolve_pending(code, "approved")
         journal.log_approval(code=code, asset_id=p["asset_id"], kind=p["kind"],
                              event="approved", raw_text=raw, sender=None)

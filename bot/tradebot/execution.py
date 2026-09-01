@@ -39,25 +39,43 @@ def _gates_buy(ticket, total_value, marks_fresh):
     return ref
 
 
-def process_ticket(ticket, total_value, marks_fresh):
-    """Called by core for each new BUY NOW ticket. Returns disposition."""
+def _run_gates(ticket, total_value, marks_fresh):
+    """Gates 1-4. Returns the reference price, or None having logged and
+    alerted the rejection."""
     asset = ticket["asset_id"]
     try:
-        ref = _gates_buy(ticket, total_value, marks_fresh)
+        return _gates_buy(ticket, total_value, marks_fresh)
     except risk.Reject as rj:
         risk.log_reject(asset, rj)
         state.set_ticket_status(ticket["ticket_id"], f"blocked:{rj.rule}")
         alerts.not_bought(asset, rj.rule, rj.detail)
-        return "blocked"
+        return None
 
+
+def process_ticket(ticket, total_value, marks_fresh):
+    """Called by core for each new BUY NOW ticket. Returns disposition."""
+    ref = _run_gates(ticket, total_value, marks_fresh)
+    if ref is None:
+        return "blocked"
     # gate 5: whitelist or approval
-    if state.is_whitelisted(asset):
+    if state.is_whitelisted(ticket["asset_id"]):
         return execute_buy(ticket, ref)
     approval.request_buy_approval(ticket, ref, {
         "Size": f"${ticket['notional_usd']:.2f}",
         "Zone": f"{ticket.get('buy_zone_lo')}-{ticket.get('buy_zone_hi')}",
         "Invalidation": ticket.get("invalidation_price")})
     return "awaiting_approval"
+
+
+def execute_approved(ticket, total_value, marks_fresh):
+    """A tapped YES satisfies gate 5 and nothing else. Gates 1-4 -- halt mode,
+    ticket staleness and buy zone, risk limits, exit-safety -- run again here
+    against the state at the moment of the tap, which may be minutes and one
+    STOP later than the alert that asked for it."""
+    ref = _run_gates(ticket, total_value, marks_fresh)
+    if ref is None:
+        return "blocked"
+    return execute_buy(ticket, ref)
 
 
 def _sanity_qty(qty, price, spent):

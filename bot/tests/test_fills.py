@@ -9,12 +9,14 @@ Run: TRADEBOT_DB=/tmp/t.db python3 -m unittest discover -s bot/tests
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("TRADEBOT_DB", os.path.join(tempfile.mkdtemp(), "test.db"))
 
-from tradebot import config, execution, state, telegram  # noqa: E402
+from tradebot import (approval, config, execution, state,  # noqa: E402
+                      telegram)
 from tradebot.exchanges import coinbase, evm_dex, solana_dex  # noqa: E402
 
 
@@ -134,6 +136,70 @@ class CoinbaseBuy(Base):
         self.assertEqual(r, "failed")
         self.assertIsNone(state.get_position("cex:BBB-USD"))
         self.assertEqual(cancelled, ["srv-1"])
+
+
+class ApprovedBuyGates(Base):
+    """A tapped YES satisfies gate 5 only -- it must not walk past the others."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        self.patch(execution, "execute_buy",
+                   lambda t, ref: self.calls.append(t["asset_id"]) or "filled")
+        self.addCleanup(state.set_mode, "NORMAL", "test cleanup")
+
+    def test_a_clean_approved_buy_still_executes(self):
+        # Positive control: the two blocks below must be the gates, not the setup.
+        state.set_mode("NORMAL", reason="test")
+        self.patch(execution.marketdata, "price", lambda a: 1.0)
+        self.patch(execution.risk, "check_buy", lambda *a, **k: None)
+        t = ticket("cex:GGG-USD", "coinbase")
+        t["ts"] = time.time()
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "filled")
+        self.assertEqual(self.calls, ["cex:GGG-USD"])
+
+    def test_halt_blocks_an_approved_buy(self):
+        state.set_mode("USER_STOP", reason="test")
+        r = execution.execute_approved(ticket("cex:DDD-USD", "coinbase"), 1000.0, True)
+        self.assertEqual(r, "blocked")
+        self.assertEqual(self.calls, [])
+
+    def test_stale_ticket_blocks_an_approved_buy(self):
+        state.set_mode("NORMAL", reason="test")
+        t = ticket("cex:EEE-USD", "coinbase")
+        t["ts"] = 0  # older than TICKET_MAX_AGE_SEC
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "blocked")
+        self.assertEqual(self.calls, [])
+
+
+class ApprovalCodes(Base):
+    def setUp(self):
+        super().setUp()
+        self.approved = []
+        self.cmds = approval.Commands(
+            self.approved.append, lambda *a: None,
+            lambda: "status", lambda a=None: "report", lambda a: "why")
+        self.patch(config, "TELEGRAM_USER_ID", 42)
+        self.addCleanup(state.set_mode, "NORMAL", "test cleanup")
+
+    def _pending(self, code):
+        state.add_pending(code, "buy", "cex:FFF-USD", "t-cex:FFF-USD", 600)
+
+    def test_yes_while_stopped_neither_buys_nor_burns_the_code(self):
+        state.set_mode("USER_STOP", reason="test")
+        self._pending("A1B2")
+        self.cmds.handle("YES A1B2")
+        self.assertEqual(self.approved, [])
+        self.assertEqual(state.get_pending("A1B2")["status"], "pending")
+
+    def test_the_same_code_works_after_resume(self):
+        state.set_mode("USER_STOP", reason="test")
+        self._pending("C3D4")
+        self.cmds.handle("YES C3D4")
+        state.set_mode("NORMAL", reason="test")
+        self.cmds.handle("YES C3D4")
+        self.assertEqual(len(self.approved), 1)
+        self.assertEqual(state.get_pending("C3D4")["status"], "approved")
 
 
 class TelegramPoller(Base):

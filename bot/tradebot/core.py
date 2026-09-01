@@ -40,20 +40,17 @@ def why_text(asset):
 
 
 def on_approved_buy(pending):
-    """YES on a buy code: re-validate price/age, then execute or re-queue."""
+    """YES on a buy code. The approval satisfies gate 5 and nothing else: the
+    full gate sequence runs again against the state at the moment of the tap."""
     t = journal.query("SELECT * FROM tickets WHERE ticket_id=?", (pending["ticket_id"],))
     if not t:
         return
     ticket = t[0]
-    price = marketdata.price(ticket["asset_id"])
-    lo, hi = ticket.get("buy_zone_lo"), ticket.get("buy_zone_hi")
-    stale = time.time() - ticket["ts"] > config.TICKET_MAX_AGE_SEC
-    if price is None or stale or (lo and hi and not (lo <= price <= hi)):
-        state.set_ticket_status(ticket["ticket_id"], "revalidate")
-        alerts.ops(f"Not executed - price left buy zone. {ticket['asset_id']} whitelisted; "
-                   "will auto-buy if it requalifies.")
-        return
-    execution.execute_buy(ticket, price)
+    value, fresh = monitor.portfolio_value()
+    if execution.execute_approved(ticket, value, fresh) == "blocked":
+        alerts.ops(f"{ticket['asset_id']} approved but conditions changed since the "
+                   "alert. Not bought. It stays whitelisted and will auto-buy if it "
+                   "requalifies.")
 
 
 TG_HALT_SOURCE = "telegram_down"

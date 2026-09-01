@@ -48,6 +48,17 @@ def reconcile_cash():
             journal.log_event("recon_fetch_fail", detail=f"{venue}: {e}")
 
 
+def portfolio_value():
+    """Read-only portfolio value for gate checks: no sampling, no
+    reconciliation, no effect on the halt series."""
+    assets = [p["asset_id"] for p in state.positions()]
+    marks, fresh = marketdata.marks(assets)
+    value = state.total_value(marks) if fresh or not assets else None
+    if value is not None and value <= 0:
+        value = None
+    return value, fresh
+
+
 def portfolio_tick():
     """Sample flow-adjusted value; run the halt check; expire approvals."""
     if time.time() - _last_recon[0] >= config.RECON_INTERVAL_SEC or _last_recon[0] == 0:
