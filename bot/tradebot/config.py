@@ -19,6 +19,11 @@ COINBASE_API_KEY = env("COINBASE_API_KEY")           # CDP key name
 COINBASE_API_SECRET = env("COINBASE_API_SECRET")     # CDP private key (Ed25519)
 COINBASE_PORTFOLIO = env("COINBASE_PORTFOLIO", "HypeBot")
 ANTHROPIC_MODEL = env("ANTHROPIC_MODEL", "claude-opus-5")
+# Cost controls (agent layer). Editable via secrets.env without a code change.
+DISCOVERY_INTERVAL_SEC = int(env("DISCOVERY_INTERVAL_SEC", "900"))
+AGENT_EFFORT = env("AGENT_EFFORT", "low")          # low effort suits routine scanning
+AGENT_MAX_TOKENS = int(env("AGENT_MAX_TOKENS", "8000"))
+AGENT_MAX_CANDIDATES = int(env("AGENT_MAX_CANDIDATES", "15"))  # payload cap per cycle
 SOLANA_KEYFILE = env("SOLANA_KEYFILE", "/etc/tradebot/solana_wallet.json")
 EVM_KEYFILE = env("EVM_KEYFILE", "/etc/tradebot/evm_wallet.key")
 SOLANA_RPC = env("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
