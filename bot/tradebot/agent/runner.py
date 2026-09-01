@@ -11,7 +11,9 @@ from . import prompts
 
 MAX_CANDIDATES_PER_CYCLE = 6
 
-client = anthropic.Anthropic()
+client = anthropic.Anthropic(
+    default_headers=({"anthropic-workspace-id": config.ANTHROPIC_WORKSPACE_ID}
+                     if config.ANTHROPIC_WORKSPACE_ID else None))
 
 
 def gather():

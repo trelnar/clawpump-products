@@ -19,6 +19,9 @@ COINBASE_API_KEY = env("COINBASE_API_KEY")           # CDP key name
 COINBASE_API_SECRET = env("COINBASE_API_SECRET")     # CDP private key (Ed25519)
 COINBASE_PORTFOLIO = env("COINBASE_PORTFOLIO", "HypeBot")
 ANTHROPIC_MODEL = env("ANTHROPIC_MODEL", "claude-opus-5")
+# Identity-linked (Personal) API keys must name the workspace they act in.
+# Leave unset for a Workspace-type key.
+ANTHROPIC_WORKSPACE_ID = env("ANTHROPIC_WORKSPACE_ID")
 # Cost controls (agent layer). Editable via secrets.env without a code change.
 DISCOVERY_INTERVAL_SEC = int(env("DISCOVERY_INTERVAL_SEC", "900"))
 AGENT_EFFORT = env("AGENT_EFFORT", "low")          # low effort suits routine scanning
