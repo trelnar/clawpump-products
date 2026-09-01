@@ -26,7 +26,16 @@ def gather():
         if info and info["liquidity_usd"] > 5000:
             enriched.append({"chain": it["chain"], "address": it["address"], **{
                 k: info[k] for k in ("price", "liquidity_usd", "volume_h24",
-                                     "base_symbol", "created_ms")}})
+                                     "base_symbol", "created_ms", "pair_address")}})
+    # Price history for the deepest few: wave-structure needs candles, and
+    # fetching them for everything would burn rate limits and payload budget.
+    enriched.sort(key=lambda c: c.get("liquidity_usd", 0), reverse=True)
+    for c in enriched[:config.AGENT_CANDLE_SHORTLIST]:
+        rows = marketdata.ohlcv_dex(c["chain"], c.get("pair_address"), "hour", 1, 120)
+        if len(rows) >= 40:                      # skill precondition
+            c["candles_1h"] = marketdata.compact_candles(rows, keep=60)
+            c["candles_note"] = "[high, low, close, volume] oldest-first, 1h"
+
     for m in marketdata.coinbase_movers():
         journal.log_discovery(f"cex:{m['product']}", m["source"], m["raw"])
         if len(enriched) < config.AGENT_MAX_CANDIDATES + 5:
@@ -101,7 +110,8 @@ def submit(cands):
                          chain=chain if chain != "cex" else None,
                          action="BUY_NOW", notional_usd=size,
                          buy_zone_lo=c.get("buy_zone_lo"), buy_zone_hi=c.get("buy_zone_hi"),
-                         invalidation_price=c.get("invalidation_price"),
+                         invalidation_price=(c.get("wave_invalidation")
+                                             or c.get("invalidation_price")),
                          forecast_id=fid, detail=c.get("what"))
         n += 1
     return n

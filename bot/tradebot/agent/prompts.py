@@ -36,6 +36,12 @@ Non-negotiable rules:
 
 === SIGNAL HYGIENE ===
 {_skill('signal-hygiene')}
+
+=== WAVE STRUCTURE ===
+Apply only to candidates whose payload includes a `candles` series. Structure is
+context and invalidation, never a signal on its own, never a veto, never an
+input to position size.
+{_skill('wave-structure')}
 """
 
 
@@ -70,6 +76,18 @@ FORECAST_SCHEMA = {
                     "hype_driver": {"type": "string"},
                     "manipulation_notes": {"type": "string"},
                     "trigger": {"type": "string"},
+                    "wave_timeframe": {"type": "string",
+                        "description": "Timeframe the count belongs to, or empty when no candles were supplied"},
+                    "wave_count": {"type": "string",
+                        "description": "Working count, or insufficient_data / invalid / unclear"},
+                    "wave_confidence_state": {"type": "string",
+                        "enum": ["possible", "probable", "confirmed", "none"]},
+                    "wave_invalidation": {"type": "number",
+                        "description": "Structural invalidation price when the count yields one, else 0"},
+                    "wave_confirmation_level": {"type": "number",
+                        "description": "Price whose impulsive take confirms the bullish path, else 0"},
+                    "completed_five_risk": {"type": "boolean",
+                        "description": "A five appears complete on the entry timeframe (selloff-risk input, not a veto)"},
                 },
             },
         },

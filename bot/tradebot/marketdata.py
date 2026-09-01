@@ -78,6 +78,55 @@ def marks(asset_ids):
     return out, fresh
 
 
+# --- price history (wave-structure preconditions) ---------------------------
+GECKO = "https://api.geckoterminal.com/api/v2"
+GECKO_NET = {"solana": "solana", "base": "base"}
+
+
+def ohlcv_dex(chain, pool_address, timeframe="hour", aggregate=1, limit=100):
+    """Keyless OHLCV for an on-chain pool. Returns oldest-first list of
+    [ts, open, high, low, close, volume], or [] when unavailable."""
+    net = GECKO_NET.get(chain)
+    if not net or not pool_address:
+        return []
+    try:
+        j = _get(f"{GECKO}/networks/{net}/pools/{pool_address}/ohlcv/{timeframe}",
+                 params={"aggregate": aggregate, "limit": limit}, timeout=15)
+        rows = (((j.get("data") or {}).get("attributes") or {})
+                .get("ohlcv_list") or [])
+        rows = [[float(x) for x in r] for r in rows if r and len(r) >= 6]
+        rows.sort(key=lambda r: r[0])          # API returns newest-first
+        return rows
+    except Exception as e:
+        journal.log_event("ohlcv_fetch_fail", f"{chain}:{pool_address}", str(e)[:200])
+        return []
+
+
+def ohlcv_cex(product_id, granularity=3600):
+    """Coinbase candles. Public response rows are
+    [time, low, high, open, close, volume] - reordered here to OHLC."""
+    try:
+        rows = _get(f"https://api.exchange.coinbase.com/products/{product_id}/candles",
+                    params={"granularity": granularity})
+        out = [[float(r[0]), float(r[3]), float(r[2]), float(r[1]),
+                float(r[4]), float(r[5])] for r in rows if len(r) >= 6]
+        out.sort(key=lambda r: r[0])
+        return out
+    except Exception as e:
+        journal.log_event("ohlcv_fetch_fail", f"cex:{product_id}", str(e)[:200])
+        return []
+
+
+def compact_candles(rows, keep=60, digits=8):
+    """Trim to the most recent `keep` candles as [high, low, close, volume],
+    rounded. Keeps the research payload small without losing swing structure."""
+    out = []
+    for r in rows[-keep:]:
+        out.append([round(r[2], digits), round(r[3], digits),
+                    round(r[4], digits), round(r[5], 2)])
+    return out
+
+
 # --- discovery --------------------------------------------------------------
 def dexscreener_trending():
     """Boosted/trending token profiles across chains (keyless)."""
