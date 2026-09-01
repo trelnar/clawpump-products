@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL, asset_id TEXT, venue TEXT, chain TEXT, action TEXT, status TEXT,
   notional_usd REAL, buy_zone_lo REAL, buy_zone_hi REAL, invalidation_price REAL,
-  forecast_id INTEGER, detail TEXT
+  forecast_id INTEGER, detail TEXT, plan TEXT, sell_fraction REAL
 );
 CREATE TABLE IF NOT EXISTS pending_approvals (
   code TEXT PRIMARY KEY, ts REAL, expires REAL, kind TEXT, asset_id TEXT,
@@ -33,8 +33,21 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
 """
 
 
+def _migrate():
+    """Additive column migrations. The DB outlives any single deploy."""
+    for table, col, decl in (("tickets", "plan", "TEXT"),
+                             ("tickets", "sell_fraction", "REAL")):
+        cols = {r["name"] for r in journal.query(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            with journal._lock:
+                journal.conn().execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                journal.conn().commit()
+            journal.log_event("schema_migrate", detail=f"{table}.{col}")
+
+
 def init():
     journal.conn().executescript(STATE_SCHEMA)
+    _migrate()
     if get_mode() is None:
         set_mode("SELL_ONLY", reason="cold start; awaiting reconciliation")
     if get_kv("phase") is None:
@@ -109,8 +122,53 @@ def upsert_position(asset_id, venue, chain, dqty, dcost, entry_liq=None,
 def close_position(asset_id):
     with journal._lock:
         journal.conn().execute("DELETE FROM positions WHERE asset_id=?", (asset_id,))
+        journal.conn().execute("DELETE FROM kv WHERE k=?", (f"plan_done:{asset_id}",))
         journal.conn().commit()
     journal.log_event("position_closed", asset_id)
+
+
+def position_plan(asset_id_or_row):
+    """The standing profit plan as a dict. Never raises on malformed JSON --
+    a bad plan must not take the monitor loop down with it."""
+    row = (asset_id_or_row if isinstance(asset_id_or_row, dict)
+           else get_position(asset_id_or_row))
+    if not row:
+        return {}
+    try:
+        return json.loads(row.get("plan") or "{}") or {}
+    except (TypeError, ValueError):
+        journal.log_event("bad_plan_json", row.get("asset_id"))
+        return {}
+
+
+def set_position_plan(asset_id, plan):
+    """No-op when the plan is unchanged -- the model re-sends the same HOLD
+    plan every cycle, and clearing leg completion each time would re-fire a
+    scale-out that already executed. A genuinely new plan does clear them:
+    its legs are different legs, and completion is tracked by index."""
+    plan = plan or {}
+    if position_plan(asset_id) == plan:
+        return False
+    with journal._lock:
+        c = journal.conn()
+        c.execute("UPDATE positions SET plan=? WHERE asset_id=?",
+                  (json.dumps(plan), asset_id))
+        c.execute("DELETE FROM kv WHERE k=?", (f"plan_done:{asset_id}",))
+        c.commit()
+    journal.log_event("plan_update", asset_id, plan)
+    return True
+
+
+def plan_legs_done(asset_id):
+    try:
+        return set(json.loads(get_kv(f"plan_done:{asset_id}", "[]")))
+    except (TypeError, ValueError):
+        return set()
+
+
+def mark_plan_leg_done(asset_id, index):
+    done = plan_legs_done(asset_id) | {index}
+    set_kv(f"plan_done:{asset_id}", json.dumps(sorted(done)))
 
 
 def cash(venue=None):

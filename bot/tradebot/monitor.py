@@ -5,6 +5,38 @@ import time
 from . import config, execution, journal, marketdata, state
 
 
+def entry_price(p):
+    """Cost basis per whole unit. Partial exits scale qty and cost together, so
+    this stays the original entry across a scale-out."""
+    return (p["cost_basis_usd"] / p["qty"]) if p.get("qty") else None
+
+
+def run_profit_plan(p, price):
+    """A standing scale-out fires mechanically -- position-monitor requires the
+    fast path to stay armed while the model layer is thinking. Fractions are of
+    the REMAINING position, and each leg fires at most once."""
+    asset = p["asset_id"]
+    entry = entry_price(p)
+    if not entry:
+        return False
+    legs = state.position_plan(p).get("profit_plan") or []
+    done = state.plan_legs_done(asset)
+    for i, leg in enumerate(legs):
+        if i in done or not isinstance(leg, dict):
+            continue
+        mult, frac = leg.get("multiple"), leg.get("sell_fraction")
+        if not mult or not frac or price < entry * mult:
+            continue
+        journal.log_event("profit_plan_leg", asset,
+                          {"leg": i, "multiple": mult, "fraction": frac, "price": price})
+        result = execution.execute_sell(
+            asset, f"standing plan: {frac:.0%} of remainder at {mult}x", min(frac, 1.0))
+        if result in ("filled", "dust", "no_position"):
+            state.mark_plan_leg_done(asset, i)
+        return True  # at most one leg per tick; re-evaluate on the next pass
+    return False
+
+
 def check_positions():
     """One monitoring pass over every held position."""
     for p in state.positions():
@@ -17,6 +49,8 @@ def check_positions():
         if inv and price <= inv:
             journal.log_event("invalidation_cross", asset, {"price": price, "inv": inv})
             execution.execute_sell(asset, f"invalidation {inv} crossed at {price}")
+            continue
+        if run_profit_plan(p, price):
             continue
         # liquidity deterioration on tokens
         if p.get("chain") in ("solana", "base") and p.get("entry_liquidity_usd"):

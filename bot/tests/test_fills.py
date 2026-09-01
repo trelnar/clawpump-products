@@ -15,8 +15,9 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("TRADEBOT_DB", os.path.join(tempfile.mkdtemp(), "test.db"))
 
-from tradebot import (approval, config, execution, state,  # noqa: E402
-                      telegram)
+from tradebot import (approval, config, execution, monitor,  # noqa: E402
+                      state, telegram)
+from tradebot.agent import runner  # noqa: E402
 from tradebot.exchanges import coinbase, evm_dex, solana_dex  # noqa: E402
 
 
@@ -58,6 +59,7 @@ class SanityQty(Base):
 
 class SolanaBuy(Base):
     def _stub(self, before, after, decimals, confirm="finalized"):
+        self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
         self.patch(solana_dex, "token_decimals", lambda m: decimals)
         seq = iter([(before, decimals), (after, decimals)])
         self.patch(solana_dex, "token_balance", lambda m: next(seq))
@@ -91,6 +93,10 @@ class SolanaBuy(Base):
 
 
 class BaseChainBuy(Base):
+    def setUp(self):
+        super().setUp()
+        self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
+
     def test_pending_tx_is_not_a_fill(self):
         self.patch(evm_dex, "token_balance", lambda t: (0, 18))
         self.patch(evm_dex, "swap", lambda *a, **k: "0xdead")
@@ -200,6 +206,121 @@ class ApprovalCodes(Base):
         self.cmds.handle("YES C3D4")
         self.assertEqual(len(self.approved), 1)
         self.assertEqual(state.get_pending("C3D4")["status"], "approved")
+
+
+class ProfitPlan(Base):
+    """The standing scale-out position-monitor requires the fast path to run
+    without a model call."""
+
+    def setUp(self):
+        super().setUp()
+        self.sells = []
+        self.patch(monitor.execution, "execute_sell",
+                   lambda a, r, f=1.0: self.sells.append((a, round(f, 4))) or "filled")
+
+    def _pos(self, asset, plan):
+        state.close_position(asset)
+        state.upsert_position(asset, "solana", "solana", 1000.0, 5.0, plan=plan)
+        return state.get_position(asset)
+
+    def test_leg_fires_at_its_multiple_and_only_once(self):
+        # entry = $5 / 1000 units = $0.005; 2x = $0.010
+        p = self._pos("solana:PLAN1", {"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]})
+        self.assertTrue(monitor.run_profit_plan(p, 0.010))
+        self.assertEqual(self.sells, [("solana:PLAN1", 0.5)])
+        self.assertFalse(monitor.run_profit_plan(p, 0.020))  # leg already done
+        self.assertEqual(len(self.sells), 1)
+
+    def test_below_the_multiple_nothing_fires(self):
+        p = self._pos("solana:PLAN2", {"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]})
+        self.assertFalse(monitor.run_profit_plan(p, 0.009))
+        self.assertEqual(self.sells, [])
+
+    def test_legs_fire_in_order_one_per_tick(self):
+        p = self._pos("solana:PLAN3", {"profit_plan": [
+            {"multiple": 2, "sell_fraction": 0.5}, {"multiple": 3, "sell_fraction": 1.0}]})
+        monitor.run_profit_plan(p, 0.020)   # past both levels
+        monitor.run_profit_plan(p, 0.020)
+        self.assertEqual(self.sells, [("solana:PLAN3", 0.5), ("solana:PLAN3", 1.0)])
+
+    def test_resending_the_same_plan_does_not_rearm_a_fired_leg(self):
+        plan = {"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]}
+        p = self._pos("solana:PLAN6", plan)
+        monitor.run_profit_plan(p, 0.010)
+        self.assertEqual(len(self.sells), 1)
+        state.set_position_plan("solana:PLAN6", plan)   # the next HOLD cycle
+        self.assertFalse(monitor.run_profit_plan(state.get_position("solana:PLAN6"), 0.010))
+        self.assertEqual(len(self.sells), 1)
+
+    def test_a_changed_plan_rearms(self):
+        p = self._pos("solana:PLAN7", {"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]})
+        monitor.run_profit_plan(p, 0.010)
+        state.set_position_plan("solana:PLAN7",
+                                {"profit_plan": [{"multiple": 2, "sell_fraction": 0.25}]})
+        self.assertTrue(monitor.run_profit_plan(state.get_position("solana:PLAN7"), 0.010))
+        self.assertEqual(self.sells, [("solana:PLAN7", 0.5), ("solana:PLAN7", 0.25)])
+
+    def test_no_plan_is_not_an_error(self):
+        p = self._pos("solana:PLAN4", None)
+        self.assertFalse(monitor.run_profit_plan(p, 99.0))
+        self.assertEqual(self.sells, [])
+
+    def test_malformed_plan_does_not_raise(self):
+        p = self._pos("solana:PLAN5", None)
+        state.set_position_plan("solana:PLAN5", {"profit_plan": [{"multiple": "x"}, None]})
+        self.assertFalse(monitor.run_profit_plan(state.get_position("solana:PLAN5"), 99.0))
+        self.assertEqual(self.sells, [])
+
+
+class PlanValidation(Base):
+    def test_malformed_legs_are_dropped(self):
+        self.assertIsNone(runner._plan_of({"profit_plan": [
+            {"multiple": 2}, {"sell_fraction": 0.5}, {"multiple": 1, "sell_fraction": 0.5},
+            {"multiple": 2, "sell_fraction": 0}, {"multiple": 2, "sell_fraction": 1.5},
+            "junk", None]}))
+
+    def test_good_legs_survive(self):
+        self.assertEqual(
+            runner._plan_of({"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]}),
+            {"profit_plan": [{"multiple": 2.0, "sell_fraction": 0.5}]})
+
+
+class SubmitRouting(Base):
+    def setUp(self):
+        super().setUp()
+        self.patch(runner.marketdata, "marks", lambda a: ({}, True))
+        self.patch(runner.state, "total_value", lambda m: 1000.0)
+        self.patch(runner.risk, "compute_size", lambda v: 5.0)
+        for a in ("solana:HELD", "solana:GHOST"):
+            state.close_position(a)
+        state.upsert_position("solana:HELD", "solana", "solana", 1000.0, 5.0)
+
+    def _tickets(self, asset):
+        return [t for t in state.tickets("new") if t["asset_id"] == asset]
+
+    def test_sell_now_on_a_held_asset_files_a_ticket(self):
+        runner.submit([{"asset_id": "solana:HELD", "action": "SELL_NOW",
+                        "sell_fraction": 0.25}])
+        t = self._tickets("solana:HELD")[-1]
+        self.assertEqual(t["action"], "SELL_NOW")
+        self.assertAlmostEqual(t["sell_fraction"], 0.25)
+
+    def test_sell_now_on_nothing_held_is_dropped(self):
+        self.assertEqual(runner.submit([{"asset_id": "solana:GHOST",
+                                         "action": "SELL_NOW"}]), 0)
+        self.assertEqual(self._tickets("solana:GHOST"), [])
+
+    def test_add_without_a_position_is_dropped(self):
+        self.assertEqual(runner.submit([{"asset_id": "solana:GHOST",
+                                         "action": "ADD"}]), 0)
+
+    def test_hold_updates_the_standing_plan_and_files_nothing(self):
+        before = len(state.tickets("new"))
+        runner.submit([{"asset_id": "solana:HELD", "action": "HOLD",
+                        "profit_plan": [{"multiple": 3, "sell_fraction": 1.0}]}])
+        self.assertEqual(len(state.tickets("new")), before)
+        self.assertEqual(state.position_plan("solana:HELD"),
+                         {"profit_plan": [{"multiple": 3.0, "sell_fraction": 1.0}]})
 
 
 class TelegramPoller(Base):

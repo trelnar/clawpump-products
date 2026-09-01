@@ -62,7 +62,8 @@ FORECAST_SCHEMA = {
                     "asset_id": {"type": "string",
                                  "description": "solana:<mint> | base:<0xaddr> | cex:<PRODUCT-ID>"},
                     "action": {"type": "string",
-                               "enum": ["BUY_NOW", "COMING_UP", "PASS"]},
+                               "enum": ["BUY_NOW", "COMING_UP", "HOLD", "ADD",
+                                        "SELL_NOW", "PASS"]},
                     "p2x": {"type": "number"}, "p3x": {"type": "number"},
                     "p5x": {"type": "number"}, "p10x": {"type": "number"},
                     "confidence": {"type": "number"},
@@ -88,6 +89,28 @@ FORECAST_SCHEMA = {
                         "description": "Price whose impulsive take confirms the bullish path, else 0"},
                     "completed_five_risk": {"type": "boolean",
                         "description": "A five appears complete on the entry timeframe (selloff-risk input, not a veto)"},
+                    "sell_fraction": {"type": "number",
+                        "description": "SELL_NOW only: fraction of the REMAINING position to sell, 0-1. Omit or 1 for a full exit."},
+                    "profit_plan": {
+                        "type": "array",
+                        "description": ("Standing scale-out the deterministic core executes "
+                                        "without you, mechanically, the moment a level hits -- "
+                                        "including while you are not running. Fractions are of "
+                                        "the REMAINING position and legs fire in order. Leave "
+                                        "empty when the evidence does not support a fixed plan; "
+                                        "do not add a 2x exit by reflex."),
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["multiple", "sell_fraction"],
+                            "properties": {
+                                "multiple": {"type": "number",
+                                    "description": "Price multiple of entry, e.g. 2 for 2x"},
+                                "sell_fraction": {"type": "number",
+                                    "description": "Fraction of the remaining position, 0-1"},
+                            },
+                        },
+                    },
                 },
             },
         },

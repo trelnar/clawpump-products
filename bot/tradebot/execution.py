@@ -1,5 +1,6 @@
 """execution skill: gate sequence + order lifecycle. Sells always execute;
 buys pass five gates. All gates are code — no model call on the trade path."""
+import json
 import time
 
 from . import alerts, approval, config, journal, marketdata, risk, state
@@ -76,6 +77,19 @@ def execute_approved(ticket, total_value, marks_fresh):
     if ref is None:
         return "blocked"
     return execute_buy(ticket, ref)
+
+
+def _entry_liquidity(asset_id, chain):
+    """position-monitor's liquidity-drain exit compares live pool depth against
+    entry-time depth. Without a baseline recorded here it never fires."""
+    if chain not in ("solana", "base"):
+        return None
+    try:
+        info = marketdata.dexscreener_token(chain, asset_id.split(":", 1)[1])
+        return info["liquidity_usd"] if info else None
+    except Exception as e:
+        journal.log_event("entry_liquidity_fail", asset_id, str(e))
+        return None
 
 
 def _sanity_qty(qty, price, spent):
@@ -156,6 +170,7 @@ def execute_buy(ticket, ref_price):
     and the dollars it actually spent. Nothing is booked before confirmation."""
     asset, venue, chain = ticket["asset_id"], ticket["venue"], ticket.get("chain")
     notional = ticket["notional_usd"]
+    entry_liq = _entry_liquidity(asset, chain)  # baseline before we move the pool
     try:
         if venue == "coinbase":
             product = asset.split(":", 1)[1]
@@ -203,8 +218,16 @@ def execute_buy(ticket, ref_price):
 
     cash_venue = venue if venue == "coinbase" else chain
     state.set_cash(cash_venue, state.cash(cash_venue) - spent)
-    state.upsert_position(asset, venue, chain, qty, spent,
-                          invalidation=ticket.get("invalidation_price"))
+    plan = ticket.get("plan")
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (TypeError, ValueError):
+            plan = None
+    state.upsert_position(asset, venue, chain, qty, spent, entry_liq=entry_liq,
+                          invalidation=ticket.get("invalidation_price"), plan=plan)
+    if plan and state.position_plan(asset) != plan:
+        state.set_position_plan(asset, plan)  # an ADD carries a revised plan
     try:
         _sanity_qty(qty, fill_price, spent)
     except Exception as e:

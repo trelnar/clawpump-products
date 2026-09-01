@@ -114,10 +114,15 @@ def main():
                 last["value"] = now
                 # pick up new tickets from the agent layer
                 for t in state.tickets("new"):
-                    if t["action"] == "BUY_NOW":
+                    if t["action"] in ("BUY_NOW", "ADD"):
+                        # An ADD targets a held (therefore already approved)
+                        # asset, so gate 5 passes on the whitelist; the risk
+                        # limits still see the combined position.
                         execution.process_ticket(t, value, fresh)
                     elif t["action"] == "SELL_NOW":
-                        execution.execute_sell(t["asset_id"], "agent SELL NOW")
+                        frac = t.get("sell_fraction")
+                        frac = 1.0 if frac in (None, "") else min(float(frac), 1.0)
+                        execution.execute_sell(t["asset_id"], "agent SELL NOW", frac)
                         state.set_ticket_status(t["ticket_id"], "done")
         except Exception as e:
             journal.log_event("core_loop_error", detail=repr(e))
