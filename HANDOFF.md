@@ -69,7 +69,7 @@ These are judgment gaps, not bugs. They decide whether the bot is *worth running
 ### 3b. Critical — FIXED in the repo, not yet deployed
 
 Fixed on branch `claude/trading-bot-skills-sfqmfo`, covered by `bot/tests/test_fills.py`
-(20 tests, `cd bot && python3 -m unittest discover -s tests`). **Deploy before trading.**
+(33 tests, `cd bot && python3 -m unittest discover -s tests`). **Deploy before trading.**
 
 - **C1. Solana positions were booked in raw token units.** `execution.py` stored Jupiter's
   raw `outAmount`; marks are USD per whole token, so a $5 fill reported ~$5M of portfolio
@@ -101,7 +101,7 @@ Fixed on branch `claude/trading-bot-skills-sfqmfo`, covered by `bot/tests/test_f
 
 | Theme | The problem |
 |---|---|
-| **Exits don't work** | No take-profit path; the forecast schema has no SELL/HOLD/ADD action; `entry_liquidity_usd` is never written so the liquidity-drain exit is dead. Only a model-supplied invalidation price can ever close a position. |
+| ~~**Exits don't work**~~ | *Fixed.* `entry_liquidity_usd` is recorded at entry, reviving the liquidity-drain exit. The forecast schema gained `HOLD`/`ADD`/`SELL_NOW` (per the strategy skill's own action list) plus a `profit_plan` the fast path executes mechanically — one leg per tick, fractions of the remainder, each leg once. Held positions now reach the model with entry, mark, multiple, age, invalidation and standing plan, so reassessment is actually possible; `submit()` routes each action and `SELL_NOW` carries a partial fraction. Still open: no time stop, and none of it has run against a real position. |
 | ~~**Gate bypass**~~ | *Fixed.* An approved buy ran `execute_buy` directly, skipping gates 1-4 — so a tapped `YES` executed even under `USER_STOP`. Approvals now go through `execution.execute_approved`, which re-runs halt/staleness/risk/exit-safety at the moment of the tap, and `YES` on a buy is refused outright when mode isn't `NORMAL` (without consuming the code — `RESUME`, then the same `YES` works). |
 | **Fill integrity** | *Mostly closed by C1/C2:* fills, proceeds, and Coinbase fees now come from the venue. Still open: fees are folded into cost basis but not recorded per-fill in the journal. |
 | **Concurrency** | Approved buys execute on the Telegram poller thread, blocking STOP/FLATTEN for 90+ seconds. Two threads place orders with no mutex. |
@@ -153,4 +153,4 @@ exercised at least once — the drills (STOP/RESUME, FLATTEN) both passed.
 The design principle throughout: **the model decides, code enforces.** No model output can
 raise a limit, skip an approval, or size a position. Where the audit found that principle
 violated, those were the highest-value fixes: §3b C1-C3 and the §3c gate bypass are closed.
-The exits cluster is next — the bot can now buy correctly and still barely sell.
+The exits cluster is closed too; what it now needs is a live position to prove it.
