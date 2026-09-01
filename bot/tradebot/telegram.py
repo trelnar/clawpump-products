@@ -6,7 +6,7 @@ import time
 
 import requests
 
-from . import config, journal
+from . import config, journal, state
 
 API = "https://api.telegram.org/bot{token}/{method}"
 
@@ -36,40 +36,71 @@ def send(text, buttons=None):
 
 
 class Poller(threading.Thread):
-    """Long-poll getUpdates; hand every authorized command string to handler."""
+    """Long-poll getUpdates; hand every authorized command string to handler.
+
+    The kill switch lives on this thread, so it must not be killable: every
+    update is dispatched inside its own guard, the offset survives a restart,
+    and `last_ok` lets the core loop notice a thread that has gone quiet."""
+
+    OFFSET_KEY = "telegram_offset"
 
     def __init__(self, handler):
         super().__init__(daemon=True)
         self.handler = handler
-        self.offset = 0
+        self.offset = int(state.get_kv(self.OFFSET_KEY, 0) or 0)
         self.stop_flag = False
+        self.last_ok = time.time()
+
+    def _commit_offset(self, offset):
+        """Persist before dispatch: a command that crashes the process must not
+        be redelivered forever on restart."""
+        self.offset = offset
+        try:
+            state.set_kv(self.OFFSET_KEY, offset)
+        except Exception as e:
+            journal.log_event("telegram_offset_persist_fail", detail=str(e))
 
     def run(self):
         while not self.stop_flag:
             try:
                 updates = _call("getUpdates", offset=self.offset, timeout=30,
                                 allowed_updates=["message", "callback_query"])
+                self.last_ok = time.time()
             except Exception as e:
                 journal.log_event("telegram_poll_fail", detail=str(e))
                 time.sleep(5)
                 continue
             for u in updates:
-                self.offset = max(self.offset, u["update_id"] + 1)
-                self._dispatch(u)
+                try:
+                    self._commit_offset(max(self.offset, u["update_id"] + 1))
+                    self._dispatch(u)
+                except Exception as e:  # one malformed update must not end polling
+                    journal.log_event("telegram_dispatch_error", detail=repr(e))
+
+    def stale_sec(self):
+        return time.time() - self.last_ok
+
+    def healthy(self):
+        return self.is_alive() and self.stale_sec() < config.TELEGRAM_STALE_SEC
 
     def _dispatch(self, u):
         if "callback_query" in u:
-            cq = u["callback_query"]
-            sender = cq["from"]["id"]
+            cq = u["callback_query"] or {}
+            sender = (cq.get("from") or {}).get("id")
             text = (cq.get("data") or "").strip()
-            try:
-                _call("answerCallbackQuery", callback_query_id=cq["id"])
-            except Exception:
-                pass
+            if cq.get("id"):
+                try:
+                    _call("answerCallbackQuery", callback_query_id=cq["id"])
+                except Exception:
+                    pass
         elif "message" in u:
-            sender = u["message"]["from"]["id"]
-            text = (u["message"].get("text") or "").strip()
+            msg = u["message"] or {}
+            sender = (msg.get("from") or {}).get("id")
+            text = (msg.get("text") or "").strip()
         else:
+            return
+        if sender is None:
+            journal.log_event("telegram_update_no_sender", detail=str(u)[:200])
             return
         journal.log_approval(code=None, asset_id=None, kind="inbound",
                              event="received", raw_text=text[:500], sender=str(sender))

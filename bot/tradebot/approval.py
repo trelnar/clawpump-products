@@ -59,7 +59,9 @@ class Commands:
             alerts.ops("STOP acknowledged. Buying halted, open buy orders cancelled, "
                        "selling continues. Reply RESUME to re-enable.")
         elif cmd == "RESUME" and not arg:
-            if state.get_mode() in ("USER_STOP", "EMERGENCY_HALT"):
+            # RECON_FREEZE included: the fill sanity guard can land there, and a
+            # mode with no way out is a mode that strands the bot.
+            if state.get_mode() in ("USER_STOP", "EMERGENCY_HALT", "RECON_FREEZE"):
                 request_resume_approval()
             else:
                 alerts.ops(f"Nothing to resume (mode {state.get_mode()}).")

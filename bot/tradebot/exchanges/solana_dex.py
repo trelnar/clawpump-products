@@ -56,6 +56,17 @@ def token_balance(mint):
     return amt, dec
 
 
+def token_decimals(mint):
+    """Authoritative decimals from the mint account. token_balance() reports 0
+    when no associated account exists yet, so raw->whole conversion cannot rely
+    on it for a first buy."""
+    res = _rpc("getAccountInfo", [mint, {"encoding": "jsonParsed"}])
+    v = res.get("value")
+    if not v:
+        raise RuntimeError(f"mint account not found: {mint}")
+    return int(v["data"]["parsed"]["info"]["decimals"])
+
+
 def quote(input_mint, output_mint, amount_raw, slippage_bps):
     r = requests.get(f"{JUP}/quote", params={
         "inputMint": input_mint, "outputMint": output_mint, "amount": str(amount_raw),

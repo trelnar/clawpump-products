@@ -66,6 +66,12 @@ VALUE_SAMPLE_SEC = 60            # rolling value series sampling
 RECON_INTERVAL_SEC = 300         # reconciliation poll
 STALE_PRICE_SEC = 120
 HEARTBEAT_SEC = 60
+FILL_TIMEOUT_CEX_SEC = 60        # wait for a limit order to fill before cancelling
+FILL_TIMEOUT_EVM_SEC = 180       # wait for a Base swap receipt
+FILL_TIMEOUT_SOL_SEC = 90        # wait for a Solana signature to confirm
+QTY_SANITY_FACTOR = 10           # booked qty*price must be within this of cost
+TELEGRAM_STALE_SEC = 300         # no successful poll for this long -> SELL_ONLY
+TELEGRAM_WATCHDOG_SEC = 30       # how often the core checks the poller
 LIQ_DRAIN_WARN = 0.30            # pool liquidity down vs entry -> urgent reeval
 LIQ_DRAIN_EXIT = 0.50            # -> exit evaluation, default exit
 

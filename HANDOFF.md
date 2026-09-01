@@ -1,8 +1,10 @@
 # HypeBot — Handoff
 
-**Status as of 2026-09-01: LIVE, holding ~$895 of real money, and it should be stopped.**
-An audit found 3 critical defects that fire on the first trade. Send `STOP` in Telegram
-before anything else. Full inventory of all 106 findings: `AUDIT.md`.
+**Status as of 2026-09-01: LIVE, holding ~$895 of real money. Not yet redeployed.**
+An audit found 3 critical defects that fire on the first trade. **C1-C3 are fixed in the
+repo but the VPS is still running the old code** — `git pull && systemctl restart` on the
+VPS is the next physical action. Until then, keep it on `STOP`.
+Full inventory of all 106 findings: `AUDIT.md`.
 
 ---
 
@@ -37,7 +39,7 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
 - **Phase 1** of `go-live`: every order $5. First buy of any asset needs Telegram approval;
   adds and sells are automatic.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
-  *These are currently defeated by finding C1 below.*
+  *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).
 - **Trades executed to date: zero.**
 
@@ -64,21 +66,36 @@ These are judgment gaps, not bugs. They decide whether the bot is *worth running
 5. **Wave structure is unproven here.** Encoded faithfully and fenced (no vetoes, no sizing).
    Its one concrete contribution is structural invalidation levels.
 
-### 3b. Critical — fix before any trade
+### 3b. Critical — FIXED in the repo, not yet deployed
 
-- **C1. Solana positions are booked in raw token units.** `execution.py:80` stores Jupiter's
-  raw `outAmount`; marks are USD per whole token. A $5 fill reports ~$5M of portfolio value,
-  which silently slackens *every* percentage limit and guarantees a spurious `EMERGENCY_HALT`
-  when the position closes. Base/Coinbase book whole units — the venues disagree.
-  *Fix:* divide by token decimals; assert `qty*mark` is within an order of magnitude of cost basis.
-- **C2. Buys are booked as filled with no confirmation** on all three venues. A rejected
-  Coinbase limit order or an unlanded swap becomes a phantom position.
-  *Fix:* poll order/tx status and book from the actual fill, not the assumed one.
-- **C3. The Telegram listener is an unsupervised daemon thread** with unguarded `cq['from']['id']`
-  access. One unusual update kills it permanently; trading continues with the kill switch dead
-  and the heartbeat still green.
-  *Fix:* guard `_dispatch`, persist `offset`, supervise the thread, and drop to `SELL_ONLY`
-  if inbound is down 5 minutes (which `vps-ops` already specifies).
+Fixed on branch `claude/trading-bot-skills-sfqmfo`, covered by `bot/tests/test_fills.py`
+(15 tests, `cd bot && python3 -m unittest discover -s tests`). **Deploy before trading.**
+
+- **C1. Solana positions were booked in raw token units.** `execution.py` stored Jupiter's
+  raw `outAmount`; marks are USD per whole token, so a $5 fill reported ~$5M of portfolio
+  value and silently slackened every percentage limit.
+  *Fixed:* quantity now comes from the token-balance delta divided by the mint's
+  authoritative decimals (`solana_dex.token_decimals`). Base does the same via the ERC-20
+  `decimals()` call. A `_sanity_qty` check requires `qty * price` to land within 10x of the
+  dollars actually spent; when it doesn't, the fill is still booked (an invisible position is
+  worse) and the bot drops to `RECON_FREEZE` with an ops alert rather than trading off a
+  portfolio value it distrusts.
+- **C2. Buys were booked as filled with no confirmation** on all three venues. A rejected
+  Coinbase limit order or an unlanded swap became a phantom position.
+  *Fixed:* Coinbase orders are polled to a terminal state and booked from `filled_size` /
+  `average_filled_price` / `total_fees` — partial fills book what filled and the remainder is
+  cancelled; zero fill books nothing. Base swaps wait for a receipt (`confirm()` returning
+  `unknown` no longer counts as success). Solana waits for the signature. Sells got the same
+  treatment: proceeds are a measured USDC balance delta, and an unconfirmed exit leaves the
+  position on the books with a `SELL FAILED` alert instead of silently closing it.
+- **C3. The Telegram listener was an unsupervised daemon thread** with unguarded
+  `cq['from']['id']` access. One unusual update killed it permanently; trading continued with
+  the kill switch dead and the heartbeat still green.
+  *Fixed:* every update dispatches inside its own guard, `sender` is read defensively, the
+  offset persists to `kv` so a crash doesn't redeliver forever, and `Poller.healthy()` exposes
+  liveness. `core.supervise_telegram` checks it every 30s, respawns a dead thread, and drops to
+  `SELL_ONLY` after 5 minutes without a successful poll — exits and monitoring keep running —
+  restoring `NORMAL` only for a halt it set itself.
 
 ### 3c. High — themed clusters (72 findings, details in AUDIT.md)
 
@@ -86,9 +103,9 @@ These are judgment gaps, not bugs. They decide whether the bot is *worth running
 |---|---|
 | **Exits don't work** | No take-profit path; the forecast schema has no SELL/HOLD/ADD action; `entry_liquidity_usd` is never written so the liquidity-drain exit is dead. Only a model-supplied invalidation price can ever close a position. |
 | **Gate bypass** | An approved buy skips four of the five execution gates, including the halt check and risk limits. |
-| **Fill integrity** | Coinbase order responses discarded; sell proceeds fabricated when the price feed is down; fees recorded nowhere and absent from cost basis. |
+| **Fill integrity** | *Mostly closed by C1/C2:* fills, proceeds, and Coinbase fees now come from the venue. Still open: fees are folded into cost basis but not recorded per-fill in the journal. |
 | **Concurrency** | Approved buys execute on the Telegram poller thread, blocking STOP/FLATTEN for 90+ seconds. Two threads place orders with no mutex. |
-| **Recovery** | No backups of journal or wallet keys. Cold-start recovery unimplemented — every restart resumes in NORMAL and can buy within 60s. `SELL_ONLY`/`RECON_FREEZE` are dead-end modes with no path back. |
+| **Recovery** | No backups of journal or wallet keys. Cold-start recovery unimplemented. `RESUME` now also clears `RECON_FREEZE` (C1's sanity guard can land there), but `SELL_ONLY` still has no user-facing exit besides the Telegram watchdog's own recovery. |
 | **Observability** | Zero stdout logging; `journalctl` is empty and every diagnostic is trapped in SQLite. The dead-man's switch pings *before* doing the work, so it stays green through a total core failure. The agent layer has no alert path at all — the Anthropic key expiring in 30 days would be silent. |
 | **Security** | Both wallets blind-sign transactions built by third-party aggregators (no router allowlist, no simulation). The research service is handed every credential. Telegram token gets written into the journal on transport errors. |
 | **Unimplemented skills** | `backtest-replay`, calibration, `capital-allocation`, `equities-constraints` are prose only. Every decision-logic change goes straight to live money. |
@@ -119,6 +136,9 @@ bash /opt/tradebot/scripts/spend.sh
 sqlite3 /var/lib/tradebot/tradebot.db "SELECT datetime(ts,'unixepoch'), kind, substr(detail,1,120) FROM events ORDER BY ts DESC LIMIT 20;"
 ```
 
+**Tests**: `cd bot && python3 -m unittest discover -s tests` — no network, no credentials,
+runs anywhere. Add a case here for every fix that touches the order path.
+
 **Monitoring**: healthchecks.io (`tradebot-heartbeat`, 5 min period) alerts Telegram + email
 when the core stops pinging. Note the caveat in §3c — it can report green through a failure.
 
@@ -132,4 +152,4 @@ exercised at least once — the drills (STOP/RESUME, FLATTEN) both passed.
 
 The design principle throughout: **the model decides, code enforces.** No model output can
 raise a limit, skip an approval, or size a position. Where the audit found that principle
-violated (§3b C1, §3c gate bypass), those are the highest-value fixes.
+violated, those were the highest-value fixes: §3b C1 is closed, and §3c gate bypass is next.

@@ -60,52 +60,55 @@ def process_ticket(ticket, total_value, marks_fresh):
     return "awaiting_approval"
 
 
-def execute_buy(ticket, ref_price):
-    asset, venue, chain = ticket["asset_id"], ticket["venue"], ticket.get("chain")
-    notional = ticket["notional_usd"]
+def _sanity_qty(qty, price, spent):
+    """C1 guard: a booked position must be worth roughly what we paid for it.
+    Catches raw-base-units vs whole-token unit errors before they enter state
+    and slacken every percentage limit that reads off portfolio value."""
+    if qty is None or qty <= 0:
+        raise RuntimeError("zero quantity filled")
+    if not price or price <= 0 or not spent or spent <= 0:
+        return  # nothing to compare against; caller already confirmed the fill
+    implied = qty * price
+    f = config.QTY_SANITY_FACTOR
+    if implied > spent * f or implied < spent / f:
+        raise RuntimeError(f"unit mismatch: {qty:.6g} @ {price:.6g} = ${implied:.2f} "
+                           f"vs ${spent:.2f} paid")
+
+
+def _await_coinbase(oid, timeout=None):
+    """Poll a submitted order to a terminal state. Returns
+    (filled_qty, avg_price, spent_usd, status, order_id)."""
+    timeout = config.FILL_TIMEOUT_CEX_SEC if timeout is None else timeout
+    terminal = ("FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED")
+    t0, last = time.time(), None
+    while True:
+        o = coinbase.order_status(oid)
+        if o:
+            last = o
+            if (o.get("status") or "").upper() in terminal:
+                break
+        if time.time() - t0 >= timeout:
+            break
+        time.sleep(2)
+    o = last or {}
+    qty = float(o.get("filled_size") or 0)
+    avg = float(o.get("average_filled_price") or 0)
+    fee = float(o.get("total_fees") or 0)
+    st = (o.get("status") or "UNKNOWN").upper()
+    return qty, avg, qty * avg + fee, st, o.get("order_id")
+
+
+def _cancel_quietly(order_id):
+    if not order_id:
+        return
     try:
-        if venue == "coinbase":
-            product = asset.split(":", 1)[1]
-            bid, ask = coinbase.best_price(product)
-            limit = (ask or ref_price) * 1.0025  # marketable limit, tier cap
-            oid, _ = coinbase.limit_buy(product, notional, limit)
-            qty = notional / limit
-        elif chain == "solana":
-            mint = asset.split(":", 1)[1]
-            sig, q = solana_dex.swap(solana_dex.USDC_MINT, mint,
-                                     int(notional * 1e6), 300)
-            st = _await_solana(sig)
-            if st != "ok":
-                raise RuntimeError(f"swap {st}")
-            qty = int(q["outAmount"])
-            oid = sig
-        elif chain == "base":
-            token = asset.split(":", 1)[1]
-            h = evm_dex.swap(evm_dex.USDC, token, int(notional * 1e6), 300)
-            if evm_dex.confirm(h) == "failed":
-                raise RuntimeError("swap failed")
-            qty = notional / ref_price
-            oid = h
-        else:
-            raise RuntimeError(f"venue {venue}/{chain} not automatable")
+        coinbase.cancel(order_id)
     except Exception as e:
-        journal.log_event("buy_failed", asset, str(e))
-        state.set_ticket_status(ticket["ticket_id"], "failed")
-        alerts.not_bought(asset, "execution", str(e)[:120])
-        return "failed"
-
-    state.set_cash(venue if venue == "coinbase" else chain,
-                   state.cash(venue if venue == "coinbase" else chain) - notional)
-    state.upsert_position(asset, venue, chain, qty, notional,
-                          invalidation=ticket.get("invalidation_price"))
-    state.set_ticket_status(ticket["ticket_id"], "filled")
-    journal.log_fill(client_oid=oid, asset_id=asset, side="buy", qty=qty,
-                     price=ref_price, fee_usd=None, venue=venue or chain, tx_ref=oid)
-    alerts.action_alert("BOUGHT", asset, ref_price, {"Size": f"${notional:.2f}"})
-    return "filled"
+        journal.log_event("cancel_failed", detail=f"{order_id}: {e}")
 
 
-def _await_solana(sig, timeout=90):
+def _await_solana(sig, timeout=None):
+    timeout = config.FILL_TIMEOUT_SOL_SEC if timeout is None else timeout
     t0 = time.time()
     while time.time() - t0 < timeout:
         st = solana_dex.confirm(sig)
@@ -117,8 +120,95 @@ def _await_solana(sig, timeout=90):
     return "timeout"
 
 
+def _await_evm(tx_hash, timeout=None):
+    """confirm() reports 'unknown' while a tx is still pending -- treating that
+    as success is how an unlanded swap became a phantom position."""
+    timeout = config.FILL_TIMEOUT_EVM_SEC if timeout is None else timeout
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        st = evm_dex.confirm(tx_hash)
+        if st in ("confirmed", "failed"):
+            return st
+        time.sleep(5)
+    return "timeout"
+
+
+def execute_buy(ticket, ref_price):
+    """Every venue books the quantity it actually received, in whole units,
+    and the dollars it actually spent. Nothing is booked before confirmation."""
+    asset, venue, chain = ticket["asset_id"], ticket["venue"], ticket.get("chain")
+    notional = ticket["notional_usd"]
+    try:
+        if venue == "coinbase":
+            product = asset.split(":", 1)[1]
+            _bid, ask = coinbase.best_price(product)
+            limit = (ask or ref_price) * 1.0025  # marketable limit, tier cap
+            oid, _ = coinbase.limit_buy(product, notional, limit)
+            qty, avg, spent, st, order_id = _await_coinbase(oid)
+            if st != "FILLED":
+                _cancel_quietly(order_id)  # stop the unfilled remainder
+            if qty <= 0:
+                raise RuntimeError(f"no fill ({st})")
+            fill_price = avg or limit
+        elif chain == "solana":
+            mint = asset.split(":", 1)[1]
+            dec = solana_dex.token_decimals(mint)
+            before, _ = solana_dex.token_balance(mint)
+            sig, _q = solana_dex.swap(solana_dex.USDC_MINT, mint,
+                                      int(notional * 1e6), 300)
+            res = _await_solana(sig)
+            if res != "ok":
+                raise RuntimeError(f"swap {res}")
+            after, _ = solana_dex.token_balance(mint)
+            qty = (after - before) / (10 ** dec)
+            spent, fill_price = notional, ref_price
+            oid = sig
+        elif chain == "base":
+            token = asset.split(":", 1)[1]
+            before, dec = evm_dex.token_balance(token)
+            oid = evm_dex.swap(evm_dex.USDC, token, int(notional * 1e6), 300)
+            res = _await_evm(oid)
+            if res != "confirmed":
+                raise RuntimeError(f"swap {res}")
+            after, dec = evm_dex.token_balance(token)
+            qty = (after - before) / (10 ** dec)
+            spent, fill_price = notional, ref_price
+        else:
+            raise RuntimeError(f"venue {venue}/{chain} not automatable")
+        if qty is None or qty <= 0:
+            raise RuntimeError("zero quantity filled")
+    except Exception as e:
+        journal.log_event("buy_failed", asset, str(e))
+        state.set_ticket_status(ticket["ticket_id"], "failed")
+        alerts.not_bought(asset, "execution", str(e)[:120])
+        return "failed"
+
+    cash_venue = venue if venue == "coinbase" else chain
+    state.set_cash(cash_venue, state.cash(cash_venue) - spent)
+    state.upsert_position(asset, venue, chain, qty, spent,
+                          invalidation=ticket.get("invalidation_price"))
+    try:
+        _sanity_qty(qty, fill_price, spent)
+    except Exception as e:
+        # The fill is real; only the units are suspect. Book it anyway -- an
+        # invisible position is worse -- then freeze rather than keep trading
+        # off a portfolio value we do not trust.
+        journal.log_event("fill_sanity_fail", asset, str(e))
+        state.set_ticket_status(ticket["ticket_id"], "sanity_freeze")
+        state.set_mode("RECON_FREEZE", reason="fill unit sanity check failed")
+        alerts.ops(f"FROZEN after {asset} fill: {e}. The position is recorded but "
+                   "its size is not trusted. Verify at the venue before resuming.")
+        return "sanity_freeze"
+    state.set_ticket_status(ticket["ticket_id"], "filled")
+    journal.log_fill(client_oid=oid, asset_id=asset, side="buy", qty=qty,
+                     price=fill_price, fee_usd=None, venue=venue or chain, tx_ref=oid)
+    alerts.action_alert("BOUGHT", asset, fill_price, {"Size": f"${spent:.2f}"})
+    return "filled"
+
+
 def execute_sell(asset_id, reason, fraction=1.0):
-    """Sells are never gated. Prefer a worse fill over an unfilled exit."""
+    """Sells are never gated. Prefer a worse fill over an unfilled exit -- but
+    an unconfirmed exit is not an exit: the position stays on the books."""
     pos = state.get_position(asset_id)
     if not pos:
         return "no_position"
@@ -129,7 +219,11 @@ def execute_sell(asset_id, reason, fraction=1.0):
         if venue == "coinbase":
             product = asset_id.split(":", 1)[1]
             oid, _ = coinbase.market_sell(product, qty)
-            proceeds = qty * price
+            sold, avg, gross, st, _oid2 = _await_coinbase(oid)
+            if sold <= 0:
+                raise RuntimeError(f"no fill ({st})")
+            qty, price = sold, (avg or price)
+            proceeds = gross
         elif chain == "solana":
             mint = asset_id.split(":", 1)[1]
             raw, _dec = solana_dex.token_balance(mint)
@@ -137,23 +231,36 @@ def execute_sell(asset_id, reason, fraction=1.0):
             if amt <= 0:
                 state.close_position(asset_id)
                 return "dust"
-            sig, q = solana_dex.swap(mint, solana_dex.USDC_MINT, amt, 600)
-            _await_solana(sig)
-            proceeds = int(q["outAmount"]) / 1e6
+            before = solana_dex.usdc_balance()
+            sig, _q = solana_dex.swap(mint, solana_dex.USDC_MINT, amt, 600)
+            res = _await_solana(sig)
+            if res != "ok":
+                raise RuntimeError(f"swap {res}")
+            proceeds = solana_dex.usdc_balance() - before
             oid = sig
         elif chain == "base":
             token = asset_id.split(":", 1)[1]
             raw, _dec = evm_dex.token_balance(token)
             amt = int(raw * fraction)
+            if amt <= 0:
+                state.close_position(asset_id)
+                return "dust"
+            before = evm_dex.usdc_balance()
             oid = evm_dex.swap(token, evm_dex.USDC, amt, 600)
-            proceeds = qty * price
+            res = _await_evm(oid)
+            if res != "confirmed":
+                raise RuntimeError(f"swap {res}")
+            proceeds = evm_dex.usdc_balance() - before
         else:
             return "manual_only"
     except Exception as e:
         journal.log_event("sell_failed", asset_id, str(e))
-        alerts.ops(f"SELL FAILED {asset_id}: {str(e)[:120]}. Manual action may be needed.")
+        alerts.ops(f"SELL FAILED {asset_id}: {str(e)[:120]}. Position still held; "
+                   "manual action may be needed.")
         return "failed"
 
+    if proceeds < 0:
+        proceeds = 0.0  # a negative delta means someone else moved the cash
     cash_venue = venue if venue == "coinbase" else chain
     state.set_cash(cash_venue, state.cash(cash_venue) + proceeds)
     cost_part = pos["cost_basis_usd"] * fraction
