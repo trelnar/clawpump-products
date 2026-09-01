@@ -81,6 +81,8 @@ def marks(asset_ids):
 # --- price history (wave-structure preconditions) ---------------------------
 GECKO = "https://api.geckoterminal.com/api/v2"
 GECKO_NET = {"solana": "solana", "base": "base"}
+_GECKO_MIN_GAP = 2.5   # seconds between calls (public tier is ~30/min)
+_gecko_last = 0.0
 
 
 def ohlcv_dex(chain, pool_address, timeframe="hour", aggregate=1, limit=100):
@@ -89,17 +91,33 @@ def ohlcv_dex(chain, pool_address, timeframe="hour", aggregate=1, limit=100):
     net = GECKO_NET.get(chain)
     if not net or not pool_address:
         return []
-    try:
-        j = _get(f"{GECKO}/networks/{net}/pools/{pool_address}/ohlcv/{timeframe}",
-                 params={"aggregate": aggregate, "limit": limit}, timeout=15)
-        rows = (((j.get("data") or {}).get("attributes") or {})
-                .get("ohlcv_list") or [])
-        rows = [[float(x) for x in r] for r in rows if r and len(r) >= 6]
-        rows.sort(key=lambda r: r[0])          # API returns newest-first
-        return rows
-    except Exception as e:
-        journal.log_event("ohlcv_fetch_fail", f"{chain}:{pool_address}", str(e)[:200])
-        return []
+    # The public endpoint is rate limited; space calls and back off on 429
+    # rather than hammering it. Candles are optional context, never blocking.
+    global _gecko_last
+    for attempt in range(3):
+        wait = _GECKO_MIN_GAP - (time.time() - _gecko_last)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            _gecko_last = time.time()
+            r = requests.get(
+                f"{GECKO}/networks/{net}/pools/{pool_address}/ohlcv/{timeframe}",
+                params={"aggregate": aggregate, "limit": limit},
+                headers={"Accept": "application/json;version=20230302"}, timeout=15)
+            if r.status_code == 429:
+                time.sleep(2 ** attempt * 3)
+                continue
+            r.raise_for_status()
+            rows = (((r.json().get("data") or {}).get("attributes") or {})
+                    .get("ohlcv_list") or [])
+            rows = [[float(x) for x in row] for row in rows if row and len(row) >= 6]
+            rows.sort(key=lambda row: row[0])      # API returns newest-first
+            return rows
+        except Exception as e:
+            journal.log_event("ohlcv_fetch_fail", f"{chain}:{pool_address}", str(e)[:200])
+            return []
+    journal.log_event("ohlcv_rate_limited", f"{chain}:{pool_address}", "gave up after 3 tries")
+    return []
 
 
 def ohlcv_cex(product_id, granularity=3600):
