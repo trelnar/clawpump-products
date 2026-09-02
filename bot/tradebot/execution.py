@@ -37,7 +37,23 @@ def _gates_buy(ticket, total_value, marks_fresh):
         loss = measured.get("roundtrip_loss", 0)
         if loss > config.ROUNDTRIP_COST_MAX * 3:  # tolerance: quotes bundle slippage
             raise risk.Reject("roundtrip_cost", f"{loss:.1%}")
+        _check_gas(chain)
     return ref
+
+
+def _check_gas(chain):
+    """Refuse to enter a chain that cannot pay for the way out. An empty gas
+    wallet is otherwise discovered by the exit -- while already holding."""
+    try:
+        native = solana_dex.sol_balance() if chain == "solana" else evm_dex.eth_balance()
+    except Exception as e:
+        raise risk.Reject("gas_unknown", f"{chain}: {e}")
+    floor = config.GAS_COST_PER_EXIT[chain] * config.GAS_EXITS_FLOOR
+    if native < floor:
+        raise risk.Reject(
+            "gas_floor",
+            f"{chain} has {native:.6g} {config.CHAIN_GAS_TOKEN[chain]}, "
+            f"needs {floor:.6g} for {config.GAS_EXITS_FLOOR} exits")
 
 
 def _run_gates(ticket, total_value, marks_fresh):
@@ -79,6 +95,19 @@ def execute_approved(ticket, total_value, marks_fresh):
     return execute_buy(ticket, ref)
 
 
+def clamp_fraction(frac):
+    """Model-supplied fractions reach the sell path. Anything outside (0,1] is
+    nonsense -- and a negative one used to round to zero base units, which the
+    dust branch reads as 'nothing left' and DELETES a live position."""
+    try:
+        f = float(frac)
+    except (TypeError, ValueError):
+        return 1.0
+    if f != f or f <= 0:      # NaN or non-positive
+        return 1.0
+    return min(f, 1.0)
+
+
 def _entry_liquidity(asset_id, chain):
     """position-monitor's liquidity-drain exit compares live pool depth against
     entry-time depth. Without a baseline recorded here it never fires."""
@@ -107,14 +136,14 @@ def _sanity_qty(qty, price, spent):
                            f"vs ${spent:.2f} paid")
 
 
-def _await_coinbase(oid, timeout=None):
-    """Poll a submitted order to a terminal state. Returns
-    (filled_qty, avg_price, spent_usd, status, order_id)."""
+def _await_coinbase(order_id, timeout=None):
+    """Poll one order -- by the exchange's order_id, never a list read -- to a
+    terminal state. Returns (filled_qty, avg_price, spent_usd, status)."""
     timeout = config.FILL_TIMEOUT_CEX_SEC if timeout is None else timeout
     terminal = ("FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED")
     t0, last = time.time(), None
     while True:
-        o = coinbase.order_status(oid)
+        o = coinbase.order_status(order_id)
         if o:
             last = o
             if (o.get("status") or "").upper() in terminal:
@@ -127,7 +156,10 @@ def _await_coinbase(oid, timeout=None):
     avg = float(o.get("average_filled_price") or 0)
     fee = float(o.get("total_fees") or 0)
     st = (o.get("status") or "UNKNOWN").upper()
-    return qty, avg, qty * avg + fee, st, o.get("order_id")
+    # filled_value is the venue's own quote-currency total; prefer it to our
+    # arithmetic, which loses the per-fill price mix on a multi-fill order.
+    gross = float(o.get("filled_value") or 0) or qty * avg
+    return qty, avg, gross + fee, st
 
 
 def _cancel_quietly(order_id):
@@ -165,21 +197,47 @@ def _await_evm(tx_hash, timeout=None):
     return "timeout"
 
 
+def _settled_qty(read_raw, before, decimals, fallback_raw=0):
+    """Quantity received by a swap that has ALREADY confirmed.
+
+    Past this point the money is spent and the tokens are ours, so a failed or
+    not-yet-visible balance read must never be reported as a fill of zero --
+    that books nothing, tells the owner NOT BOUGHT, and orphans real tokens
+    that no reconciliation path can ever find again. Retry, then fall back to
+    the quote's own output and tell the caller the number is unmeasured."""
+    last_err = None
+    for attempt in range(config.SETTLE_READ_TRIES):
+        try:
+            after = read_raw()
+            if after > before:
+                return (after - before) / (10 ** decimals), True
+        except Exception as e:
+            last_err = e
+        if attempt + 1 < config.SETTLE_READ_TRIES:
+            time.sleep(config.SETTLE_READ_SLEEP_SEC)
+    journal.log_event("settle_read_unresolved",
+                      detail=f"{last_err}" if last_err else "balance unchanged")
+    if fallback_raw > 0:
+        return fallback_raw / (10 ** decimals), False
+    raise RuntimeError(f"swap confirmed but quantity unreadable: {last_err}")
+
+
 def execute_buy(ticket, ref_price):
     """Every venue books the quantity it actually received, in whole units,
     and the dollars it actually spent. Nothing is booked before confirmation."""
     asset, venue, chain = ticket["asset_id"], ticket["venue"], ticket.get("chain")
     notional = ticket["notional_usd"]
     entry_liq = _entry_liquidity(asset, chain)  # baseline before we move the pool
+    measured = True
     try:
         if venue == "coinbase":
             product = asset.split(":", 1)[1]
             _bid, ask = coinbase.best_price(product)
             limit = (ask or ref_price) * 1.0025  # marketable limit, tier cap
             oid, _ = coinbase.limit_buy(product, notional, limit)
-            qty, avg, spent, st, order_id = _await_coinbase(oid)
+            qty, avg, spent, st = _await_coinbase(oid)
             if st != "FILLED":
-                _cancel_quietly(order_id)  # stop the unfilled remainder
+                _cancel_quietly(oid)  # stop the unfilled remainder
             if qty <= 0:
                 raise RuntimeError(f"no fill ({st})")
             fill_price = avg or limit
@@ -187,13 +245,14 @@ def execute_buy(ticket, ref_price):
             mint = asset.split(":", 1)[1]
             dec = solana_dex.token_decimals(mint)
             before, _ = solana_dex.token_balance(mint)
-            sig, _q = solana_dex.swap(solana_dex.USDC_MINT, mint,
-                                      int(notional * 1e6), 300)
+            sig, q = solana_dex.swap(solana_dex.USDC_MINT, mint,
+                                     int(notional * 1e6), 300)
             res = _await_solana(sig)
             if res != "ok":
                 raise RuntimeError(f"swap {res}")
-            after, _ = solana_dex.token_balance(mint)
-            qty = (after - before) / (10 ** dec)
+            qty, measured = _settled_qty(
+                lambda: solana_dex.token_balance(mint)[0], before, dec,
+                fallback_raw=int((q or {}).get("outAmount") or 0))
             spent, fill_price = notional, ref_price
             oid = sig
         elif chain == "base":
@@ -203,8 +262,8 @@ def execute_buy(ticket, ref_price):
             res = _await_evm(oid)
             if res != "confirmed":
                 raise RuntimeError(f"swap {res}")
-            after, dec = evm_dex.token_balance(token)
-            qty = (after - before) / (10 ** dec)
+            qty, measured = _settled_qty(
+                lambda: evm_dex.token_balance(token)[0], before, dec)
             spent, fill_price = notional, ref_price
         else:
             raise RuntimeError(f"venue {venue}/{chain} not automatable")
@@ -228,17 +287,24 @@ def execute_buy(ticket, ref_price):
                           invalidation=ticket.get("invalidation_price"), plan=plan)
     if plan and state.position_plan(asset) != plan:
         state.set_position_plan(asset, plan)  # an ADD carries a revised plan
-    try:
-        _sanity_qty(qty, fill_price, spent)
-    except Exception as e:
-        # The fill is real; only the units are suspect. Book it anyway -- an
-        # invisible position is worse -- then freeze rather than keep trading
+    doubt = None
+    if not measured:
+        doubt = "quantity came from the quote, not a confirmed balance read"
+    else:
+        try:
+            _sanity_qty(qty, fill_price, spent)
+        except Exception as e:
+            doubt = str(e)
+    if doubt:
+        # The fill is real; only our number for it is suspect. Book it anyway --
+        # an invisible position is worse -- then freeze rather than keep trading
         # off a portfolio value we do not trust.
-        journal.log_event("fill_sanity_fail", asset, str(e))
+        journal.log_event("fill_not_trusted", asset, doubt)
         state.set_ticket_status(ticket["ticket_id"], "sanity_freeze")
-        state.set_mode("RECON_FREEZE", reason="fill unit sanity check failed")
-        alerts.ops(f"FROZEN after {asset} fill: {e}. The position is recorded but "
-                   "its size is not trusted. Verify at the venue before resuming.")
+        state.set_mode("RECON_FREEZE", reason=f"unverified fill: {doubt[:80]}")
+        alerts.ops(f"FROZEN after {asset} fill: {doubt}. The position IS recorded and "
+                   "its exits are armed, but its size is not trusted. Verify at the "
+                   "venue, then RESUME.")
         return "sanity_freeze"
     state.set_ticket_status(ticket["ticket_id"], "filled")
     journal.log_fill(client_oid=oid, asset_id=asset, side="buy", qty=qty,
@@ -260,7 +326,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
         if venue == "coinbase":
             product = asset_id.split(":", 1)[1]
             oid, _ = coinbase.market_sell(product, qty)
-            sold, avg, gross, st, _oid2 = _await_coinbase(oid)
+            sold, avg, gross, st = _await_coinbase(oid)
             if sold <= 0:
                 raise RuntimeError(f"no fill ({st})")
             qty, price = sold, (avg or price)
@@ -304,12 +370,19 @@ def execute_sell(asset_id, reason, fraction=1.0):
         proceeds = 0.0  # a negative delta means someone else moved the cash
     cash_venue = venue if venue == "coinbase" else chain
     state.set_cash(cash_venue, state.cash(cash_venue) + proceeds)
-    cost_part = pos["cost_basis_usd"] * fraction
+    # Book what actually left, not what we asked to leave. A partial fill on a
+    # full exit must reduce the position, never delete it -- deleting orphans
+    # the unsold tokens, and nothing reconciles positions back from the venue.
+    held = pos["qty"] or 0.0
+    sold_share = min(qty / held, 1.0) if held else 1.0
+    cost_part = pos["cost_basis_usd"] * sold_share
     pnl = proceeds - cost_part
-    if fraction >= 0.999:
+    if sold_share >= 0.999:
         state.close_position(asset_id)
     else:
         state.upsert_position(asset_id, venue, chain, -qty, -cost_part)
+        journal.log_event("partial_exit", asset_id,
+                          {"requested": fraction, "sold_share": round(sold_share, 4)})
     journal.log_fill(client_oid=oid, asset_id=asset_id, side="sell", qty=qty,
                      price=price, fee_usd=None, venue=venue or chain, tx_ref=oid)
     alerts.sell_alert(asset_id, price, reason,

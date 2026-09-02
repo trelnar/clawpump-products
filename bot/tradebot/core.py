@@ -120,8 +120,7 @@ def main():
                         # limits still see the combined position.
                         execution.process_ticket(t, value, fresh)
                     elif t["action"] == "SELL_NOW":
-                        frac = t.get("sell_fraction")
-                        frac = 1.0 if frac in (None, "") else min(float(frac), 1.0)
+                        frac = execution.clamp_fraction(t.get("sell_fraction"))
                         execution.execute_sell(t["asset_id"], "agent SELL NOW", frac)
                         state.set_ticket_status(t["ticket_id"], "done")
         except Exception as e:

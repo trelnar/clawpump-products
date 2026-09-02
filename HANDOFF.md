@@ -1,6 +1,11 @@
 # HypeBot — Handoff
 
-**Status as of 2026-09-01: LIVE, holding ~$895 of real money. Not yet redeployed.**
+**Status as of 2026-09-02: LIVE in NORMAL, ~$880 of real money, zero positions, zero trades ever.**
+A second audit (`AUDIT-FIRSTFILL.md`, 13 agents over the newly written code) found 10 more
+defects on the trade path, 2 critical. All 10 are fixed in the repo. **STOP the bot and deploy
+before it can trade.** Do the three manual round trips in §3b before trusting it unattended.
+
+*Superseded status line:*
 An audit found 3 critical defects that fire on the first trade. **C1-C3 are fixed in the
 repo but the VPS is still running the old code** — `git pull && systemctl restart` on the
 VPS is the next physical action. Until then, keep it on `STOP`.
@@ -66,36 +71,40 @@ These are judgment gaps, not bugs. They decide whether the bot is *worth running
 5. **Wave structure is unproven here.** Encoded faithfully and fenced (no vetoes, no sizing).
    Its one concrete contribution is structural invalidation levels.
 
-### 3b. Critical — FIXED in the repo, not yet deployed
+### 3b. Before the first trade
 
-Fixed on branch `claude/trading-bot-skills-sfqmfo`, covered by `bot/tests/test_fills.py`
-(33 tests, `cd bot && python3 -m unittest discover -s tests`). **Deploy before trading.**
+Everything from the first audit's C1-C3 is fixed and deployed. The second audit
+(`AUDIT-FIRSTFILL.md`) found 10 more on the same path; all are fixed in the repo and
+**not yet deployed**. Two mattered most:
 
-- **C1. Solana positions were booked in raw token units.** `execution.py` stored Jupiter's
-  raw `outAmount`; marks are USD per whole token, so a $5 fill reported ~$5M of portfolio
-  value and silently slackened every percentage limit.
-  *Fixed:* quantity now comes from the token-balance delta divided by the mint's
-  authoritative decimals (`solana_dex.token_decimals`). Base does the same via the ERC-20
-  `decimals()` call. A `_sanity_qty` check requires `qty * price` to land within 10x of the
-  dollars actually spent; when it doesn't, the fill is still booked (an invisible position is
-  worse) and the bot drops to `RECON_FREEZE` with an ops alert rather than trading off a
-  portfolio value it distrusts.
-- **C2. Buys were booked as filled with no confirmation** on all three venues. A rejected
-  Coinbase limit order or an unlanded swap became a phantom position.
-  *Fixed:* Coinbase orders are polled to a terminal state and booked from `filled_size` /
-  `average_filled_price` / `total_fees` — partial fills book what filled and the remainder is
-  cancelled; zero fill books nothing. Base swaps wait for a receipt (`confirm()` returning
-  `unknown` no longer counts as success). Solana waits for the signature. Sells got the same
-  treatment: proceeds are a measured USDC balance delta, and an unconfirmed exit leaves the
-  position on the books with a `SELL FAILED` alert instead of silently closing it.
-- **C3. The Telegram listener was an unsupervised daemon thread** with unguarded
-  `cq['from']['id']` access. One unusual update killed it permanently; trading continued with
-  the kill switch dead and the heartbeat still green.
-  *Fixed:* every update dispatches inside its own guard, `sender` is read defensively, the
-  offset persists to `kv` so a crash doesn't redeliver forever, and `Poller.healthy()` exposes
-  liveness. `core.supervise_telegram` checks it every 30s, respawns a dead thread, and drops to
-  `SELL_ONLY` after 5 minutes without a successful poll — exits and monitoring keep running —
-  restoring `NORMAL` only for a halt it set itself.
+- **Coinbase orders were polled by an id the API cannot query.** `list_orders` has no
+  `client_order_id` filter — verified against the SDK's own source, coinbase-advanced-py
+  1.8.4, `rest/orders.py:1446`. It fell into `**kwargs`, and the code read `orders[0]` of an
+  unfiltered account-wide list without ever checking whose order it was. The second Coinbase
+  order onward would have been booked against a previous order's fill, while the real order
+  stayed resting and filled untracked. *Fixed:* the exchange `order_id` is taken from the
+  placement response and polled with `get_order`; a rejected placement raises instead of
+  entering the fill loop.
+- **A confirmed Solana buy could book as "NOT BOUGHT."** The post-swap balance was read at
+  the RPC's default `finalized` commitment, ~13s behind the `confirmed` the code waits for —
+  so the read returned the *pre*-swap balance, `qty` came out 0, and the money-already-spent
+  fill was reported to the owner as a failure with the tokens orphaned. *Fixed:* reads at
+  `confirmed`, retries, and past the point of broadcast a fill is **never** reported as
+  failed — it books from the quote and freezes instead.
+
+The rest: partial exits deleting whole positions, profit-plan legs re-arming on a model plan
+tweak (now keyed by price level, so a level fires once per position), `REVOKE` uppercasing
+asset ids so it silently matched nothing, an `ADD` dropping its raised stop, a negative
+model-supplied `sell_fraction` deleting a live position without selling it, and the
+`GAS_EXITS_FLOOR` that was configured but never enforced.
+
+**Then do this before trusting it unattended** — the one thing no code review can settle:
+`execute_sell` has never sold anything, anywhere. Every safety mechanism in the system ends
+in that function: the invalidation stop, the profit plan, the liquidity-drain exit, agent
+`SELL_NOW`, and your own `FLATTEN`. Do one manual round trip per venue at the smallest size
+— buy, check the books match the venue, sell, check the cash comes back — before letting the
+agent file a ticket that reaches `execute_buy`. Gate 4's exit-safety is a *quote*, and quotes
+are systematically optimistic for exactly the tokens this bot hunts.
 
 ### 3c. High — themed clusters (72 findings, details in AUDIT.md)
 
@@ -114,6 +123,11 @@ Fixed on branch `claude/trading-bot-skills-sfqmfo`, covered by `bot/tests/test_f
 
 ### 3d. Areas to explore (beyond fixing)
 
+- **Position reconciliation against venue holdings — the structural gap.** Every orphan bug
+  found in both audits fails the same direction: real assets exist that the database does not
+  know about. `reconcile_cash` only reconciles cash; nothing reads a token balance and asks
+  "should this be a position?" That single mechanism would have turned five separate findings
+  into a logged $5 anomaly. Highest-value remaining change.
 - **Two-tier research** — Haiku triages, Opus judges finalists. ~5× cheaper.
 - **Real signal sources** — the fastest credible wins are on-chain flow (a Solana indexer)
   and social acceleration. Without these, §3a.2 stays unresolved.

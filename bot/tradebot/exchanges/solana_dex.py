@@ -38,7 +38,8 @@ def sol_balance():
 
 def usdc_balance():
     res = _rpc("getTokenAccountsByOwner",
-               [address(), {"mint": USDC_MINT}, {"encoding": "jsonParsed"}])
+               [address(), {"mint": USDC_MINT},
+                {"encoding": "jsonParsed", "commitment": "confirmed"}])
     total = 0.0
     for acct in res["value"]:
         total += float(acct["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"] or 0)
@@ -46,8 +47,12 @@ def usdc_balance():
 
 
 def token_balance(mint):
+    # "confirmed", not the RPC default of "finalized": a swap we have just
+    # confirmed is ~13s from finalization, and reading at finalized returns the
+    # PRE-swap balance -- which the caller cannot distinguish from a zero fill.
     res = _rpc("getTokenAccountsByOwner",
-               [address(), {"mint": mint}, {"encoding": "jsonParsed"}])
+               [address(), {"mint": mint},
+                {"encoding": "jsonParsed", "commitment": "confirmed"}])
     amt, dec = 0, 0
     for acct in res["value"]:
         ta = acct["account"]["data"]["parsed"]["info"]["tokenAmount"]

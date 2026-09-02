@@ -109,9 +109,17 @@ def upsert_position(asset_id, venue, chain, dqty, dcost, entry_liq=None,
         cur = c.execute("SELECT qty, cost_basis_usd FROM positions WHERE asset_id=?", (asset_id,))
         row = cur.fetchone()
         if row:
-            c.execute("UPDATE positions SET qty=qty+?, cost_basis_usd=cost_basis_usd+? WHERE asset_id=?",
-                      (dqty, dcost, asset_id))
+            c.execute("UPDATE positions SET qty=qty+?, cost_basis_usd=cost_basis_usd+? "
+                      "WHERE asset_id=?", (dqty, dcost, asset_id))
+            # An ADD raises the stop. Dropping the new invalidation left a
+            # doubled position protected at the original entry's level.
+            if invalidation:
+                c.execute("UPDATE positions SET invalidation_price=? WHERE asset_id=?",
+                          (invalidation, asset_id))
         else:
+            # A fresh entry starts with a clean slate: any completion markers
+            # left by a previous life of this asset must not disarm its legs.
+            c.execute("DELETE FROM kv WHERE k=?", (f"plan_done:{asset_id}",))
             c.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?)",
                       (asset_id, venue, chain, dqty, dcost, time.time(), invalidation,
                        json.dumps(plan or {}), entry_liq, group))
@@ -142,21 +150,28 @@ def position_plan(asset_id_or_row):
 
 
 def set_position_plan(asset_id, plan):
-    """No-op when the plan is unchanged -- the model re-sends the same HOLD
-    plan every cycle, and clearing leg completion each time would re-fire a
-    scale-out that already executed. A genuinely new plan does clear them:
-    its legs are different legs, and completion is tracked by index."""
+    """Completion survives a plan revision. Legs are identified by content, so
+    a re-sent level stays done and only a genuinely new level arms -- clearing
+    completion here would re-sell the same position on every model tweak."""
     plan = plan or {}
     if position_plan(asset_id) == plan:
         return False
     with journal._lock:
-        c = journal.conn()
-        c.execute("UPDATE positions SET plan=? WHERE asset_id=?",
-                  (json.dumps(plan), asset_id))
-        c.execute("DELETE FROM kv WHERE k=?", (f"plan_done:{asset_id}",))
-        c.commit()
+        journal.conn().execute("UPDATE positions SET plan=? WHERE asset_id=?",
+                               (json.dumps(plan), asset_id))
+        journal.conn().commit()
     journal.log_event("plan_update", asset_id, plan)
     return True
+
+
+def leg_key(leg):
+    """Completion is keyed by the LEVEL, not the list index and not the size.
+
+    An index shifts whenever the model revises a plan, which re-armed legs that
+    had already sold. Including the fraction has the same flaw one step down: a
+    model that nudges 50% to 25% at the same 2x would sell there twice. A price
+    level, once taken, is taken -- a second sale needs a second level."""
+    return f"{float(leg['multiple']):.6g}x"
 
 
 def plan_legs_done(asset_id):
@@ -166,9 +181,14 @@ def plan_legs_done(asset_id):
         return set()
 
 
-def mark_plan_leg_done(asset_id, index):
-    done = plan_legs_done(asset_id) | {index}
+def mark_plan_leg_done(asset_id, leg):
+    """No-op once the position is gone: writing after close_position resurrects
+    the row it just deleted and pre-disarms the leg on the next entry."""
+    if not get_position(asset_id):
+        return False
+    done = plan_legs_done(asset_id) | {leg_key(leg)}
     set_kv(f"plan_done:{asset_id}", json.dumps(sorted(done)))
+    return True
 
 
 def cash(venue=None):

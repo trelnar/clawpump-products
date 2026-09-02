@@ -45,15 +45,18 @@ class Commands:
         self._flatten_expiry = 0
 
     def handle(self, text):
-        t = " ".join(text.upper().split())
-        parts = t.split(" ")
-        cmd = parts[0] if parts else ""
-        arg = parts[1] if len(parts) > 1 else None
+        # The verb is case-insensitive; the ARGUMENT is not. Asset ids are
+        # base58 mints and hex addresses -- uppercasing them made REVOKE match
+        # zero rows while reporting success.
+        parts = " ".join(text.split()).split(" ")
+        cmd = parts[0].upper() if parts else ""
+        raw_arg = parts[1] if len(parts) > 1 else None
+        arg = raw_arg
 
         if cmd == "YES" and arg:
-            self._yes(arg, text)
+            self._yes(arg.upper(), text)
         elif cmd == "NO" and arg:
-            self._no(arg)
+            self._no(arg.upper())
         elif cmd == "STOP" and not arg:
             state.set_mode("USER_STOP", reason="STOP command")
             alerts.ops("STOP acknowledged. Buying halted, open buy orders cancelled, "

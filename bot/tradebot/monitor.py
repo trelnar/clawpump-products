@@ -21,18 +21,25 @@ def run_profit_plan(p, price):
         return False
     legs = state.position_plan(p).get("profit_plan") or []
     done = state.plan_legs_done(asset)
-    for i, leg in enumerate(legs):
-        if i in done or not isinstance(leg, dict):
+    for leg in legs:
+        if not isinstance(leg, dict):
             continue
         mult, frac = leg.get("multiple"), leg.get("sell_fraction")
-        if not mult or not frac or price < entry * mult:
+        if not mult or not frac:
+            continue
+        try:
+            key = state.leg_key(leg)
+        except (TypeError, ValueError, KeyError):
+            continue
+        if key in done or price < entry * mult:
             continue
         journal.log_event("profit_plan_leg", asset,
-                          {"leg": i, "multiple": mult, "fraction": frac, "price": price})
+                          {"leg": key, "multiple": mult, "fraction": frac, "price": price})
         result = execution.execute_sell(
-            asset, f"standing plan: {frac:.0%} of remainder at {mult}x", min(frac, 1.0))
+            asset, f"standing plan: {frac:.0%} of remainder at {mult}x",
+            execution.clamp_fraction(frac))
         if result in ("filled", "dust", "no_position"):
-            state.mark_plan_leg_done(asset, i)
+            state.mark_plan_leg_done(asset, leg)   # no-op once the position is gone
         return True  # at most one leg per tick; re-evaluate on the next pass
     return False
 

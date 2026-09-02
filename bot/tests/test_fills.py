@@ -84,6 +84,43 @@ class SolanaBuy(Base):
         self.assertEqual(state.get_mode(), "RECON_FREEZE")
         state.set_mode("NORMAL", reason="test cleanup")
 
+    def test_a_lagging_balance_read_is_retried_not_called_zero(self):
+        # A just-confirmed swap is not yet visible; the first reads see nothing.
+        self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
+        self.patch(config, "SETTLE_READ_SLEEP_SEC", 0)
+        self.patch(solana_dex, "token_decimals", lambda m: 6)
+        reads = iter([(0, 6), (0, 6), (5_000_000_000, 6)])
+        self.patch(solana_dex, "token_balance", lambda m: next(reads))
+        self.patch(solana_dex, "swap", lambda *a, **k: ("sigL", {"outAmount": "5000000000"}))
+        self.patch(solana_dex, "confirm", lambda s: "confirmed")
+        self.patch(execution.marketdata, "price", lambda a: 0.001)
+        r = execution.execute_buy(ticket("solana:LAG", "solana", "solana"), 0.001)
+        self.assertEqual(r, "filled")
+        self.assertAlmostEqual(state.get_position("solana:LAG")["qty"], 5000.0)
+
+    def test_an_unreadable_balance_books_from_the_quote_and_freezes(self):
+        # The money is spent and the tokens are ours -- never report NOT BOUGHT.
+        self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
+        self.patch(config, "SETTLE_READ_SLEEP_SEC", 0)
+        self.patch(solana_dex, "token_decimals", lambda m: 6)
+        calls = []
+
+        def flaky(mint):
+            calls.append(1)
+            if len(calls) == 1:
+                return (0, 6)          # pre-swap baseline reads fine
+            raise RuntimeError("rpc 429")   # every post-swap read fails
+
+        self.patch(solana_dex, "token_balance", flaky)
+        self.patch(solana_dex, "swap", lambda *a, **k: ("sigX", {"outAmount": "5000000000"}))
+        self.patch(solana_dex, "confirm", lambda s: "confirmed")
+        self.patch(execution.marketdata, "price", lambda a: 0.001)
+        self.addCleanup(state.set_mode, "NORMAL", "test cleanup")
+        r = execution.execute_buy(ticket("solana:RPCX", "solana", "solana"), 0.001)
+        self.assertEqual(r, "sanity_freeze")
+        self.assertAlmostEqual(state.get_position("solana:RPCX")["qty"], 5000.0)
+        self.assertEqual(state.get_mode(), "RECON_FREEZE")
+
     def test_unconfirmed_swap_books_nothing(self):
         self._stub(0, 5_000_000_000, 6, confirm="unknown")
         self.patch(config, "FILL_TIMEOUT_SOL_SEC", 0)
@@ -116,15 +153,42 @@ class BaseChainBuy(Base):
         self.assertAlmostEqual(state.get_position("base:0xTOK2")["qty"], 2.0)
 
 
+class PlacementIdentity(Base):
+    """list_orders has no client_order_id filter, so the only handle on an order
+    we placed is the order_id the venue returns at placement."""
+
+    def test_top_level_order_id_is_used(self):
+        oid, _ = coinbase._placed("tb-1", {"success": True, "order_id": "srv-9"})
+        self.assertEqual(oid, "srv-9")
+
+    def test_nested_success_response_order_id_is_used(self):
+        oid, _ = coinbase._placed(
+            "tb-1", {"success": True, "success_response": {"order_id": "srv-10"}})
+        self.assertEqual(oid, "srv-10")
+
+    def test_rejected_placement_raises(self):
+        with self.assertRaises(RuntimeError):
+            coinbase._placed("tb-1", {"success": False,
+                                      "error_response": {"error": "INSUFFICIENT_FUND"}})
+
+    def test_placement_without_an_order_id_raises(self):
+        # Never fall back to a client id the API cannot query.
+        with self.assertRaises(RuntimeError):
+            coinbase._placed("tb-1", {"success": True})
+
+
 class CoinbaseBuy(Base):
-    def _order(self, status, filled, avg, fee=0.0):
-        return {"status": status, "filled_size": str(filled),
-                "average_filled_price": str(avg), "total_fees": str(fee),
-                "order_id": "srv-1"}
+    def _order(self, status, filled, avg, fee=0.0, value=None):
+        o = {"status": status, "filled_size": str(filled),
+             "average_filled_price": str(avg), "total_fees": str(fee),
+             "order_id": "srv-1", "client_order_id": "tb-1"}
+        if value is not None:
+            o["filled_value"] = str(value)
+        return o
 
     def test_books_the_actual_fill_not_the_intent(self):
         self.patch(coinbase, "best_price", lambda p: (1.49, 1.5))
-        self.patch(coinbase, "limit_buy", lambda p, n, l: ("tb-1", {}))
+        self.patch(coinbase, "limit_buy", lambda p, n, l: ("srv-1", {}))
         self.patch(coinbase, "order_status", lambda o: self._order("FILLED", 3, 1.5, 0.05))
         r = execution.execute_buy(ticket("cex:AAA-USD", "coinbase", None, 5.0), 1.5)
         self.assertEqual(r, "filled")
@@ -132,16 +196,34 @@ class CoinbaseBuy(Base):
         self.assertAlmostEqual(pos["qty"], 3.0)
         self.assertAlmostEqual(pos["cost_basis_usd"], 4.55)
 
-    def test_rejected_order_books_nothing_and_cancels(self):
+    def test_filled_value_beats_our_own_arithmetic(self):
+        # A multi-fill order's average loses the price mix; the venue's total does not.
+        self.patch(coinbase, "best_price", lambda p: (1.49, 1.5))
+        self.patch(coinbase, "limit_buy", lambda p, n, l: ("srv-1", {}))
+        self.patch(coinbase, "order_status",
+                   lambda o: self._order("FILLED", 3, 1.5, 0.05, value=4.62))
+        execution.execute_buy(ticket("cex:VVV-USD", "coinbase", None, 5.0), 1.5)
+        self.assertAlmostEqual(state.get_position("cex:VVV-USD")["cost_basis_usd"], 4.67)
+
+    def test_the_order_polled_is_the_order_placed(self):
+        seen = []
+        self.patch(coinbase, "best_price", lambda p: (1.49, 1.5))
+        self.patch(coinbase, "limit_buy", lambda p, n, l: ("srv-42", {}))
+        self.patch(coinbase, "order_status",
+                   lambda o: seen.append(o) or self._order("FILLED", 3, 1.5))
+        execution.execute_buy(ticket("cex:IDD-USD", "coinbase", None, 5.0), 1.5)
+        self.assertEqual(set(seen), {"srv-42"})
+
+    def test_rejected_order_books_nothing_and_cancels_that_order(self):
         cancelled = []
         self.patch(coinbase, "best_price", lambda p: (1.49, 1.5))
-        self.patch(coinbase, "limit_buy", lambda p, n, l: ("tb-2", {}))
+        self.patch(coinbase, "limit_buy", lambda p, n, l: ("srv-7", {}))
         self.patch(coinbase, "order_status", lambda o: self._order("REJECTED", 0, 0))
         self.patch(coinbase, "cancel", lambda oid: cancelled.append(oid))
-        r = execution.execute_buy(ticket("cex:BBB-USD", "coinbase", None, 5.0), 1.5)
+        r = execution.execute_buy(ticket("cex:BBB-USD", "coinbase", None, 5.0), 5.0)
         self.assertEqual(r, "failed")
         self.assertIsNone(state.get_position("cex:BBB-USD"))
-        self.assertEqual(cancelled, ["srv-1"])
+        self.assertEqual(cancelled, ["srv-7"])
 
 
 class ApprovedBuyGates(Base):
@@ -252,13 +334,30 @@ class ProfitPlan(Base):
         self.assertFalse(monitor.run_profit_plan(state.get_position("solana:PLAN6"), 0.010))
         self.assertEqual(len(self.sells), 1)
 
-    def test_a_changed_plan_rearms(self):
+    def test_resizing_a_taken_level_does_not_sell_there_twice(self):
         p = self._pos("solana:PLAN7", {"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]})
         monitor.run_profit_plan(p, 0.010)
         state.set_position_plan("solana:PLAN7",
                                 {"profit_plan": [{"multiple": 2, "sell_fraction": 0.25}]})
-        self.assertTrue(monitor.run_profit_plan(state.get_position("solana:PLAN7"), 0.010))
-        self.assertEqual(self.sells, [("solana:PLAN7", 0.5), ("solana:PLAN7", 0.25)])
+        self.assertFalse(monitor.run_profit_plan(state.get_position("solana:PLAN7"), 0.010))
+        self.assertEqual(self.sells, [("solana:PLAN7", 0.5)])
+
+    def test_a_new_level_added_by_a_revision_does_arm(self):
+        p = self._pos("solana:PLAN8", {"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]})
+        monitor.run_profit_plan(p, 0.010)
+        state.set_position_plan("solana:PLAN8", {"profit_plan": [
+            {"multiple": 2, "sell_fraction": 0.5}, {"multiple": 3, "sell_fraction": 1.0}]})
+        self.assertTrue(monitor.run_profit_plan(state.get_position("solana:PLAN8"), 0.015))
+        self.assertEqual(self.sells, [("solana:PLAN8", 0.5), ("solana:PLAN8", 1.0)])
+
+    def test_a_reentered_asset_starts_with_every_leg_armed(self):
+        plan = {"profit_plan": [{"multiple": 2, "sell_fraction": 1.0}]}
+        p = self._pos("solana:PLAN9", plan)
+        monitor.run_profit_plan(p, 0.010)
+        state.close_position("solana:PLAN9")
+        p2 = self._pos("solana:PLAN9", plan)          # bought again later
+        self.assertTrue(monitor.run_profit_plan(p2, 0.010))
+        self.assertEqual(len(self.sells), 2)
 
     def test_no_plan_is_not_an_error(self):
         p = self._pos("solana:PLAN4", None)
@@ -321,6 +420,103 @@ class SubmitRouting(Base):
         self.assertEqual(len(state.tickets("new")), before)
         self.assertEqual(state.position_plan("solana:HELD"),
                          {"profit_plan": [{"multiple": 3.0, "sell_fraction": 1.0}]})
+
+
+class GasFloor(Base):
+    """A chain that cannot pay for the way out is a chain we do not enter."""
+
+    def test_an_empty_gas_wallet_blocks_entry(self):
+        self.patch(solana_dex, "sol_balance", lambda: 0.0)
+        with self.assertRaises(execution.risk.Reject) as cm:
+            execution._check_gas("solana")
+        self.assertEqual(cm.exception.rule, "gas_floor")
+
+    def test_a_funded_wallet_passes(self):
+        self.patch(solana_dex, "sol_balance", lambda: 0.0965)
+        execution._check_gas("solana")
+
+    def test_an_unreadable_balance_fails_closed(self):
+        self.patch(evm_dex, "eth_balance",
+                   lambda: (_ for _ in ()).throw(RuntimeError("rpc down")))
+        with self.assertRaises(execution.risk.Reject) as cm:
+            execution._check_gas("base")
+        self.assertEqual(cm.exception.rule, "gas_unknown")
+
+
+class PartialExit(Base):
+    """A partial fill on a full exit must reduce the position, never delete it:
+    nothing reconciles positions back from the venue."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(execution.marketdata, "price", lambda a: 2.0)
+        state.close_position("cex:PART-USD")
+        state.upsert_position("cex:PART-USD", "coinbase", None, 10.0, 10.0)
+
+    def _order(self, filled, avg):
+        return {"status": "FILLED", "filled_size": str(filled),
+                "average_filled_price": str(avg), "total_fees": "0",
+                "order_id": "srv-p"}
+
+    def test_a_half_filled_full_exit_keeps_the_remainder(self):
+        self.patch(coinbase, "market_sell", lambda p, q: ("srv-p", {}))
+        self.patch(coinbase, "order_status", lambda o: self._order(4, 2.0))
+        self.assertEqual(execution.execute_sell("cex:PART-USD", "test", 1.0), "filled")
+        pos = state.get_position("cex:PART-USD")
+        self.assertIsNotNone(pos)
+        self.assertAlmostEqual(pos["qty"], 6.0)
+        self.assertAlmostEqual(pos["cost_basis_usd"], 6.0)
+
+    def test_a_complete_exit_still_closes(self):
+        self.patch(coinbase, "market_sell", lambda p, q: ("srv-p", {}))
+        self.patch(coinbase, "order_status", lambda o: self._order(10, 2.0))
+        self.assertEqual(execution.execute_sell("cex:PART-USD", "test", 1.0), "filled")
+        self.assertIsNone(state.get_position("cex:PART-USD"))
+
+
+class FractionBounds(Base):
+    def test_negative_and_zero_become_a_full_exit(self):
+        for bad in (-0.5, 0, "", None, "junk", float("nan")):
+            self.assertEqual(execution.clamp_fraction(bad), 1.0)
+
+    def test_over_one_is_capped(self):
+        self.assertEqual(execution.clamp_fraction(3.0), 1.0)
+
+    def test_a_real_fraction_survives(self):
+        self.assertAlmostEqual(execution.clamp_fraction(0.25), 0.25)
+
+
+class CommandParsing(Base):
+    def setUp(self):
+        super().setUp()
+        self.patch(config, "TELEGRAM_USER_ID", 42)
+        self.cmds = approval.Commands(lambda p: None, lambda *a: None,
+                                      lambda: "s", lambda a=None: "r", lambda a: "w")
+
+    def test_revoke_preserves_the_asset_id_case(self):
+        aid = "solana:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        state.whitelist_add(aid, "solana")
+        self.assertTrue(state.is_whitelisted(aid))
+        self.cmds.handle(f"revoke {aid}")
+        self.assertFalse(state.is_whitelisted(aid))
+
+    def test_the_verb_is_case_insensitive(self):
+        seen = []
+        self.patch(approval.state, "set_mode", lambda m, reason="": seen.append(m))
+        self.cmds.handle("stop")
+        self.assertEqual(seen, ["USER_STOP"])
+
+
+class AddSemantics(Base):
+    def test_an_add_raises_the_stop(self):
+        state.close_position("solana:ADDP")
+        state.upsert_position("solana:ADDP", "solana", "solana", 100.0, 5.0,
+                              invalidation=0.04)
+        state.upsert_position("solana:ADDP", "solana", "solana", 100.0, 5.0,
+                              invalidation=0.09)
+        pos = state.get_position("solana:ADDP")
+        self.assertAlmostEqual(pos["qty"], 200.0)
+        self.assertAlmostEqual(pos["invalidation_price"], 0.09)
 
 
 class TelegramPoller(Base):
