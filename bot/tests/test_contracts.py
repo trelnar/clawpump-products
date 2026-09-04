@@ -156,18 +156,21 @@ class ForecastSchemaBudget(unittest.TestCase):
         self.assertLessEqual(self._depth(self.schema), 8)
 
     def test_size_stays_within_budget(self):
-        self.assertLess(len(json.dumps(self.schema)), 6000)
+        # 6000 was a guess and the API rejected a schema well under it. This is
+        # the size of a version confirmed to compile, plus a little room. Raise
+        # it only against a fresh scripts/schema_probe.py measurement.
+        self.assertLess(len(json.dumps(self.schema)), 2600)
+
+    def test_property_count_stays_within_budget(self):
+        props = self.schema["properties"]["candidates"]["items"]["properties"]
+        self.assertLessEqual(len(props), 18)
 
     def test_every_schema_field_is_actually_read(self):
         # A field the model fills and nothing consumes is pure cost.
         import inspect
         from tradebot.agent import runner
         src = inspect.getsource(runner)
-        ignore = {"p3x", "p5x", "p10x", "confidence", "target_2x", "hype_driver",
-                  "manipulation_notes", "trigger", "predicted_window", "pass_reason",
-                  "missing_evidence", "wave_timeframe", "wave_count",
-                  "wave_confidence_state", "wave_confirmation_level",
-                  "completed_five_risk"}   # journaled wholesale via evidence_state
+        ignore = {"confidence", "missing_evidence", "notes"}  # journaled via evidence_state
         for name in self.schema["properties"]["candidates"]["items"]["properties"]:
             if name in ignore:
                 continue

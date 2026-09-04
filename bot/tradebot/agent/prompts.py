@@ -46,11 +46,12 @@ input to position size.
 
 
 FORECAST_SCHEMA = {
-    # Kept deliberately shallow. A nested array-of-objects for the profit plan
-    # (candidates[] -> object -> profit_plan[] -> object) pushed this past the
-    # structured-output compiler's limit and every request 400'd with "Schema
-    # is too complex" -- the agent produced nothing for two hours. The plan is
-    # two parallel number arrays instead, paired by index.
+    # Deliberately small. Two separate attempts were rejected with 400 "Schema
+    # is too complex" -- first for nesting objects inside arrays, then still at
+    # 28 properties -- and each one silently stopped the research layer dead.
+    # Only fields the CODE reads are typed here; everything the model wants to
+    # say about a candidate goes in `notes`, which is journaled whole. Measure
+    # the real ceiling with scripts/schema_probe.py before adding a field back.
     "type": "object",
     "additionalProperties": False,
     "required": ["candidates"],
@@ -60,50 +61,32 @@ FORECAST_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["asset_id", "action", "p2x", "confidence",
-                             "entry_price", "buy_zone_lo", "buy_zone_hi",
-                             "invalidation_price", "what", "hype_driver"],
+                "required": ["asset_id", "action", "p2x", "confidence", "what"],
                 "properties": {
                     "asset_id": {"type": "string",
                                  "description": "solana:<mint> | base:<0xaddr> | cex:<PRODUCT-ID>"},
                     "action": {"type": "string",
                                "enum": ["BUY_NOW", "COMING_UP", "HOLD", "ADD",
                                         "SELL_NOW", "PASS"]},
-                    "p2x": {"type": "number"}, "p3x": {"type": "number"},
-                    "p5x": {"type": "number"}, "p10x": {"type": "number"},
+                    "p2x": {"type": "number"},
                     "confidence": {"type": "number"},
                     "entry_price": {"type": "number"},
                     "buy_zone_lo": {"type": "number"},
                     "buy_zone_hi": {"type": "number"},
-                    "target_2x": {"type": "number"},
                     "invalidation_price": {"type": "number"},
-                    "predicted_window": {"type": "string"},
-                    "what": {"type": "string"},
-                    "hype_driver": {"type": "string"},
-                    "manipulation_notes": {"type": "string"},
-                    "trigger": {"type": "string"},
-                    "pass_reason": {"type": "string",
-                        "description": "PASS only: the specific reason this fails the 2x test"},
-                    "missing_evidence": {"type": "array", "items": {"type": "string"},
-                        "description": "Evidence the strategy wants that this payload lacked and that would have changed your answer"},
+                    "wave_invalidation": {"type": "number",
+                        "description": "Structural invalidation price, else 0"},
                     "sell_fraction": {"type": "number",
                         "description": "SELL_NOW only: fraction of the REMAINING position, 0-1"},
                     "profit_plan_multiples": {"type": "array", "items": {"type": "number"},
-                        "description": "Standing scale-out levels as multiples of entry, e.g. [2, 5]. The core executes these mechanically without you, the moment a level hits. Empty when the evidence does not support a fixed plan; do not add a 2x exit by reflex."},
+                        "description": "Standing scale-out levels as multiples of entry, e.g. [2, 5]. The core executes these without you the moment a level hits. Empty unless the evidence supports a fixed plan."},
                     "profit_plan_fractions": {"type": "array", "items": {"type": "number"},
-                        "description": "Fraction of the REMAINING position to sell at each level above, same order and length, e.g. [0.5, 1.0]"},
-                    "wave_timeframe": {"type": "string",
-                        "description": "Timeframe of the count, or empty when no candles were supplied"},
-                    "wave_count": {"type": "string",
-                        "description": "Working count, or insufficient_data / invalid / unclear"},
-                    "wave_confidence_state": {"type": "string",
-                        "enum": ["possible", "probable", "confirmed", "none"]},
-                    "wave_invalidation": {"type": "number",
-                        "description": "Structural invalidation price, else 0"},
-                    "wave_confirmation_level": {"type": "number",
-                        "description": "Price whose impulsive take confirms the bullish path, else 0"},
-                    "completed_five_risk": {"type": "boolean",
-                        "description": "A five appears complete on the entry timeframe (selloff-risk input, not a veto)"},
+                        "description": "Fraction of the REMAINING position at each level above, same order and length"},
+                    "missing_evidence": {"type": "array", "items": {"type": "string"},
+                        "description": "Evidence the strategy wants that this payload lacked and that would have changed your answer"},
+                    "what": {"type": "string", "description": "One line: what this is"},
+                    "notes": {"type": "string",
+                        "description": "Everything else, as prose: hype driver, p3x/p5x/p10x, target and predicted window, manipulation risk, confirmation trigger, wave timeframe and count and confidence, whether a five looks complete, and on a PASS the specific reason it fails the 2x test. This is recorded in full."},
                 },
             },
         },
