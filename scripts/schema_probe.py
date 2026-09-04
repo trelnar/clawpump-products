@@ -12,9 +12,14 @@ Rejected requests are not billed and max_tokens is 1, so this costs ~nothing.
 """
 import copy
 import json
+import os
 import sys
 
 sys.path.insert(0, "/opt/tradebot/bot")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _env  # noqa: E402
+_env.load()          # systemd gives the daemons their env; a script must load its own
 
 from tradebot import config  # noqa: E402
 from tradebot.agent import prompts, runner  # noqa: E402

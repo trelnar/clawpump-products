@@ -20,10 +20,15 @@ Usage, on the VPS as the bot user:
 Run one venue at a time and read the output before the next.
 """
 import argparse
+import os
 import sys
 import time
 
 sys.path.insert(0, "/opt/tradebot/bot")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _env  # noqa: E402
+_env.load()          # systemd gives the daemons their env; a script must load its own
 
 from tradebot import config, execution, journal, marketdata, state  # noqa: E402
 from tradebot.exchanges import evm_dex, solana_dex  # noqa: E402
