@@ -5,9 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=bot
+User=agent
 Group=bot
-EnvironmentFile=/etc/tradebot/secrets.env
+# The research layer ingests untrusted scraped content and talks to an external
+# API -- the largest attack surface here -- and needs none of the trading
+# credentials: it only writes tickets to SQLite, and every ticket still passes
+# all five gates in the core. agent.env carries the Anthropic key and the
+# cadence settings, and nothing that can move money.
+EnvironmentFile=/etc/tradebot/agent.env
 Environment=TRADEBOT_SKILLS=/opt/tradebot/.agents/skills
 WorkingDirectory=/opt/tradebot/bot
 ExecStart=/opt/tradebot/venv/bin/python -m tradebot.agent.runner
@@ -17,6 +22,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/tradebot
+# Belt and braces: even a full compromise of this process cannot read the keys.
+InaccessiblePaths=/etc/tradebot/secrets.env /etc/tradebot/solana_wallet.json /etc/tradebot/evm_wallet.key
 
 [Install]
 WantedBy=multi-user.target

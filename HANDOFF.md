@@ -159,6 +159,17 @@ sold anything anywhere; this is the only thing that resolves that.
 API cost is 64% of the total cost of trading and the break-even hit rate is ~42%. That
 number, not a percentage anyone picked, is the argument for more capital or fewer cycles.
 
+**One-time, as root** — separates the research layer's credentials from the trading ones:
+```
+bash /opt/tradebot/scripts/split-credentials.sh
+systemctl daemon-reload && systemctl restart tradebot-agent
+sudo -u agent cat /etc/tradebot/secrets.env   # must say Permission denied
+```
+The agent service now runs as its own `agent` user against `/etc/tradebot/agent.env`.
+Until this is run, `tradebot-agent` will fail to start (its unit points at a file that
+does not exist yet) — that ordering is deliberate: fail loudly rather than quietly keep
+handing trading credentials to the process that ingests untrusted content.
+
 **On the VPS** (`ssh -i ~/.ssh/tradebot_ed25519 root@107.191.39.195`):
 ```
 systemctl status tradebot-core tradebot-agent
