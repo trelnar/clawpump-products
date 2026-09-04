@@ -84,6 +84,7 @@ APPROVAL_EXPIRY_FAST_SEC = 600   # high-velocity approval expiry
 GATE_TIME_BUDGET_SEC = 5
 GAS_EXITS_FLOOR = 20             # native-token float sized for N exits
 GAS_COST_PER_EXIT = {"solana": 0.0008, "base": 0.00004}  # native units, one swap
+DUST_USD = 1.00                  # below this a position is genuinely dust
 ROUNDTRIP_COST_MAX = 0.03        # gas-aware minimum-position rule
 MONITOR_INTERVAL_TOKEN_SEC = 5
 MONITOR_INTERVAL_CEX_SEC = 10

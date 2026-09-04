@@ -105,6 +105,26 @@ def execute_approved(ticket, total_value, marks_fresh):
     return execute_buy(ticket, ref)
 
 
+def _no_balance(asset_id, pos):
+    """The wallet reports nothing where the books expect a holding.
+
+    That is NOT proof the position is gone. It is equally what a lagging RPC
+    read looks like, or a wrapped-SOL swap that unwrapped to the native
+    balance, or simply the wrong mint. Deleting the row on that evidence is
+    precisely how a real holding becomes invisible to every exit the bot has.
+    Only genuine dust is closed; anything worth money is kept and escalated."""
+    booked = pos.get("cost_basis_usd") or 0
+    if booked <= config.DUST_USD:
+        state.close_position(asset_id)
+        return "dust"
+    journal.log_event("sell_no_balance", asset_id,
+                      {"booked_qty": pos.get("qty"), "booked_cost": booked})
+    alerts.ops(f"{asset_id}: books show {pos.get('qty'):.6g} units (${booked:.2f}) but "
+               f"the wallet reports none. The position is NOT closed -- check the "
+               f"wallet before trading this asset again.")
+    return "no_balance"
+
+
 def clamp_fraction(frac):
     """Model-supplied fractions reach the sell path. Anything outside (0,1] is
     nonsense -- and a negative one used to round to zero base units, which the
@@ -352,8 +372,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
             raw, _dec = solana_dex.token_balance(mint)
             amt = int(raw * fraction)
             if amt <= 0:
-                state.close_position(asset_id)
-                return "dust"
+                return _no_balance(asset_id, pos)
             before = solana_dex.usdc_balance()
             sig, _q = solana_dex.swap(mint, solana_dex.USDC_MINT, amt, 600)
             res = _await_solana(sig)
@@ -366,8 +385,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
             raw, _dec = evm_dex.token_balance(token)
             amt = int(raw * fraction)
             if amt <= 0:
-                state.close_position(asset_id)
-                return "dust"
+                return _no_balance(asset_id, pos)
             before = evm_dex.usdc_balance()
             oid = evm_dex.swap(token, evm_dex.USDC, amt, 600)
             res = _await_evm(oid)

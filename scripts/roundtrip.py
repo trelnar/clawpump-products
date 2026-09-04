@@ -37,8 +37,11 @@ from tradebot.exchanges import evm_dex, solana_dex  # noqa: E402
 # Liquid, boring, always exitable. Not what the bot hunts -- that is the point.
 TARGETS = {
     "coinbase": {"asset": "cex:BTC-USDC", "venue": "coinbase", "chain": None},
-    "solana": {"asset": "solana:So11111111111111111111111111111111111111112",
-               "venue": "solana", "chain": "solana"},          # wrapped SOL
+    # USDT, not wSOL: Jupiter's wrapAndUnwrapSol turns a wSOL output into the
+    # NATIVE balance, so the SPL balance never moves and the settle read finds
+    # nothing. A plain SPL token exercises the real path.
+    "solana": {"asset": "solana:Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+               "venue": "solana", "chain": "solana"},          # USDT
     "base": {"asset": "base:0x4200000000000000000000000000000000000006",
              "venue": "base", "chain": "base"},                 # WETH on Base
 }

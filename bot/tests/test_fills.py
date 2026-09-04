@@ -541,6 +541,34 @@ class GasFloor(Base):
         self.assertEqual(cm.exception.rule, "gas_unknown")
 
 
+class NoBalanceOnSell(Base):
+    """A zero balance read is not proof the position is gone -- it is also a
+    lagging RPC, a wSOL unwrap, or the wrong mint. The wSOL round trip deleted
+    a position whose $5 had become native SOL."""
+
+    def _pos(self, asset, cost):
+        state.close_position(asset)
+        state.upsert_position(asset, "solana", "solana", 100.0, cost)
+        self.patch(execution.marketdata, "price", lambda a: 0.05)
+        self.patch(solana_dex, "token_balance", lambda m: (0, 6))
+        self.patch(solana_dex, "usdc_balance", lambda: 0.0)
+
+    def test_a_valuable_position_is_kept_and_escalated(self):
+        said = []
+        self.patch(execution.alerts, "ops", said.append)
+        self._pos("solana:GHOSTED", 5.0)
+        self.assertEqual(execution.execute_sell("solana:GHOSTED", "test", 1.0),
+                         "no_balance")
+        self.assertIsNotNone(state.get_position("solana:GHOSTED"))
+        self.assertTrue(any("NOT closed" in m for m in said))
+
+    def test_real_dust_is_still_closed(self):
+        self.patch(execution.alerts, "ops", lambda m: None)
+        self._pos("solana:TINY", 0.02)
+        self.assertEqual(execution.execute_sell("solana:TINY", "test", 1.0), "dust")
+        self.assertIsNone(state.get_position("solana:TINY"))
+
+
 class PartialExit(Base):
     """A partial fill on a full exit must reduce the position, never delete it:
     nothing reconciles positions back from the venue."""
