@@ -375,15 +375,25 @@ class ProfitPlan(Base):
 
 class PlanValidation(Base):
     def test_malformed_legs_are_dropped(self):
-        self.assertIsNone(runner._plan_of({"profit_plan": [
-            {"multiple": 2}, {"sell_fraction": 0.5}, {"multiple": 1, "sell_fraction": 0.5},
-            {"multiple": 2, "sell_fraction": 0}, {"multiple": 2, "sell_fraction": 1.5},
-            "junk", None]}))
+        self.assertIsNone(runner._plan_of({
+            "profit_plan_multiples": [1, 2, 2, "x", None],
+            "profit_plan_fractions": [0.5, 0, 1.5, 0.5, 0.5]}))
 
     def test_good_legs_survive(self):
         self.assertEqual(
-            runner._plan_of({"profit_plan": [{"multiple": 2, "sell_fraction": 0.5}]}),
+            runner._plan_of({"profit_plan_multiples": [2],
+                             "profit_plan_fractions": [0.5]}),
             {"profit_plan": [{"multiple": 2.0, "sell_fraction": 0.5}]})
+
+    def test_an_unpaired_tail_is_ignored(self):
+        # The model can return arrays of different length; never invent a leg.
+        self.assertEqual(
+            runner._plan_of({"profit_plan_multiples": [2, 5],
+                             "profit_plan_fractions": [0.5]}),
+            {"profit_plan": [{"multiple": 2.0, "sell_fraction": 0.5}]})
+
+    def test_an_empty_plan_is_none(self):
+        self.assertIsNone(runner._plan_of({}))
 
 
 class SubmitRouting(Base):
@@ -419,7 +429,8 @@ class SubmitRouting(Base):
     def test_hold_updates_the_standing_plan_and_files_nothing(self):
         before = len(state.tickets("new"))
         runner.submit([{"asset_id": "solana:HELD", "action": "HOLD",
-                        "profit_plan": [{"multiple": 3, "sell_fraction": 1.0}]}])
+                        "profit_plan_multiples": [3],
+                        "profit_plan_fractions": [1.0]}])
         self.assertEqual(len(state.tickets("new")), before)
         self.assertEqual(state.position_plan("solana:HELD"),
                          {"profit_plan": [{"multiple": 3.0, "sell_fraction": 1.0}]})
@@ -610,6 +621,49 @@ class WhitelistBounds(Base):
             state.note_reentry(self.aid)
         state.whitelist_add(self.aid, "solana")
         self.assertTrue(state.is_whitelisted(self.aid))
+
+
+class AgentWatchdog(Base):
+    """The research layer holds no Telegram credentials by design, so the core
+    is the only thing that can report its silence."""
+
+    def setUp(self):
+        super().setUp()
+        from tradebot import core, journal
+        self.core, self.journal = core, journal
+        self.said = []
+        self.patch(core.alerts, "ops", self.said.append)
+        state.set_kv("agent_alerted", "")
+        # MAX(ts) reads the whole table, so a row from a sibling test would
+        # decide this one's verdict.
+        journal.conn().execute("DELETE FROM events WHERE kind='agent_cycle'")
+        journal.conn().commit()
+
+    def _cycle(self, ago):
+        import time as t
+        self.journal.conn().execute(
+            "INSERT INTO events (ts, kind) VALUES (?, 'agent_cycle')", (t.time() - ago,))
+        self.journal.conn().commit()
+
+    def test_a_recent_cycle_is_quiet(self):
+        self._cycle(60)
+        self.core.supervise_agent()
+        self.assertEqual(self.said, [])
+
+    def test_a_long_silence_alerts_once(self):
+        self._cycle(10 * 3600)
+        self.core.supervise_agent()
+        self.core.supervise_agent()
+        self.assertEqual(len(self.said), 1)
+        self.assertIn("no cycle", self.said[0])
+
+    def test_recovery_is_reported(self):
+        self._cycle(10 * 3600)
+        self.core.supervise_agent()
+        self._cycle(10)
+        self.core.supervise_agent()
+        self.assertEqual(len(self.said), 2)
+        self.assertIn("again", self.said[1])
 
 
 class TelegramPoller(Base):

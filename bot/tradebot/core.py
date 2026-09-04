@@ -114,6 +114,31 @@ def supervise_telegram(holder, handler):
                    "Buying halted (SELL_ONLY); exits still active.")
 
 
+def supervise_agent():
+    """Watch the research layer from here, because it cannot shout for itself.
+
+    It runs in a separate process that deliberately holds no Telegram
+    credentials, so a failure there has no alert path of its own. On
+    2026-09-04 every request 400'd with "Schema is too complex" and the layer
+    produced nothing for two hours in silence. The core notices instead."""
+    r = journal.query("SELECT MAX(ts) t FROM events WHERE kind='agent_cycle'")
+    last = (r[0]["t"] if r and r[0]["t"] else 0)
+    stale = time.time() - last
+    if last and stale < config.AGENT_STALE_SEC:
+        if state.get_kv("agent_alerted"):
+            state.set_kv("agent_alerted", "")
+            alerts.ops("Research layer is producing cycles again.")
+        return
+    if state.get_kv("agent_alerted") or not last:
+        return   # already reported, or never started (nothing to compare against)
+    e = journal.query("SELECT detail FROM events WHERE kind='agent_loop_error' "
+                      "ORDER BY ts DESC LIMIT 1")
+    state.set_kv("agent_alerted", "1")
+    alerts.ops(f"Research layer has completed no cycle in {stale / 3600:.1f}h. "
+               f"Trading and exits are unaffected. Last error: "
+               f"{(e[0]['detail'] if e else 'none recorded')[:200]}")
+
+
 def main():
     state.init()
     # kv is durable: a stale marker must not let the watchdog lift the
@@ -129,7 +154,8 @@ def main():
     holder["p"].start()
     alerts.ops(f"bot-core started. Mode {state.get_mode()}, phase {state.phase()}.")
 
-    last = {"hb": 0, "value": 0, "monitor": 0, "tg": 0, "track": 0, "posrecon": 0}
+    last = {"hb": 0, "value": 0, "monitor": 0, "tg": 0, "track": 0,
+            "posrecon": 0, "agentwatch": 0}
     while True:
         now = time.time()
         due_hb = now - last["hb"] >= config.HEARTBEAT_SEC
@@ -142,6 +168,9 @@ def main():
             if now - last["monitor"] >= config.MONITOR_INTERVAL_TOKEN_SEC:
                 monitor.check_positions()
                 last["monitor"] = now
+            if now - last["agentwatch"] >= config.AGENT_WATCHDOG_SEC:
+                supervise_agent()
+                last["agentwatch"] = now
             if now - last["track"] >= config.TRACK_INTERVAL_SEC:
                 calibration.tick()
                 last["track"] = now

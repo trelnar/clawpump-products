@@ -46,6 +46,11 @@ input to position size.
 
 
 FORECAST_SCHEMA = {
+    # Kept deliberately shallow. A nested array-of-objects for the profit plan
+    # (candidates[] -> object -> profit_plan[] -> object) pushed this past the
+    # structured-output compiler's limit and every request 400'd with "Schema
+    # is too complex" -- the agent produced nothing for two hours. The plan is
+    # two parallel number arrays instead, paired by index.
     "type": "object",
     "additionalProperties": False,
     "required": ["candidates"],
@@ -76,53 +81,29 @@ FORECAST_SCHEMA = {
                     "what": {"type": "string"},
                     "hype_driver": {"type": "string"},
                     "manipulation_notes": {"type": "string"},
-                    "pass_reason": {"type": "string",
-                        "description": ("Required when action is PASS. The specific "
-                                        "reason this candidate fails the 2x-in-1-3-days "
-                                        "test -- not a restatement of the rule. If you "
-                                        "would have wanted it with better evidence, say "
-                                        "so here rather than passing silently.")},
-                    "missing_evidence": {"type": "array", "items": {"type": "string"},
-                        "description": ("Evidence the strategy asks for that this "
-                                        "payload did not contain and that would have "
-                                        "changed your answer. Be specific: 'holder "
-                                        "growth', 'social velocity', '5m candles'. "
-                                        "Empty when the data was sufficient to decide.")},
                     "trigger": {"type": "string"},
+                    "pass_reason": {"type": "string",
+                        "description": "PASS only: the specific reason this fails the 2x test"},
+                    "missing_evidence": {"type": "array", "items": {"type": "string"},
+                        "description": "Evidence the strategy wants that this payload lacked and that would have changed your answer"},
+                    "sell_fraction": {"type": "number",
+                        "description": "SELL_NOW only: fraction of the REMAINING position, 0-1"},
+                    "profit_plan_multiples": {"type": "array", "items": {"type": "number"},
+                        "description": "Standing scale-out levels as multiples of entry, e.g. [2, 5]. The core executes these mechanically without you, the moment a level hits. Empty when the evidence does not support a fixed plan; do not add a 2x exit by reflex."},
+                    "profit_plan_fractions": {"type": "array", "items": {"type": "number"},
+                        "description": "Fraction of the REMAINING position to sell at each level above, same order and length, e.g. [0.5, 1.0]"},
                     "wave_timeframe": {"type": "string",
-                        "description": "Timeframe the count belongs to, or empty when no candles were supplied"},
+                        "description": "Timeframe of the count, or empty when no candles were supplied"},
                     "wave_count": {"type": "string",
                         "description": "Working count, or insufficient_data / invalid / unclear"},
                     "wave_confidence_state": {"type": "string",
                         "enum": ["possible", "probable", "confirmed", "none"]},
                     "wave_invalidation": {"type": "number",
-                        "description": "Structural invalidation price when the count yields one, else 0"},
+                        "description": "Structural invalidation price, else 0"},
                     "wave_confirmation_level": {"type": "number",
                         "description": "Price whose impulsive take confirms the bullish path, else 0"},
                     "completed_five_risk": {"type": "boolean",
                         "description": "A five appears complete on the entry timeframe (selloff-risk input, not a veto)"},
-                    "sell_fraction": {"type": "number",
-                        "description": "SELL_NOW only: fraction of the REMAINING position to sell, 0-1. Omit or 1 for a full exit."},
-                    "profit_plan": {
-                        "type": "array",
-                        "description": ("Standing scale-out the deterministic core executes "
-                                        "without you, mechanically, the moment a level hits -- "
-                                        "including while you are not running. Fractions are of "
-                                        "the REMAINING position and legs fire in order. Leave "
-                                        "empty when the evidence does not support a fixed plan; "
-                                        "do not add a 2x exit by reflex."),
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["multiple", "sell_fraction"],
-                            "properties": {
-                                "multiple": {"type": "number",
-                                    "description": "Price multiple of entry, e.g. 2 for 2x"},
-                                "sell_fraction": {"type": "number",
-                                    "description": "Fraction of the remaining position, 0-1"},
-                            },
-                        },
-                    },
                 },
             },
         },

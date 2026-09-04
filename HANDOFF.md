@@ -144,6 +144,8 @@ are systematically optimistic for exactly the tokens this bot hunts.
 
 - `SCORE` — what forecasts predicted vs what happened, split by the action taken.
   Empty until the first forecasts resolve (72h horizon).
+- `SCORE`/`GAPS` need the research layer running; if it is silent for 45 minutes the
+  core now says so unprompted (it holds no Telegram credentials of its own).
 - `GAPS` — why it is not trading: PASS reasons, and the evidence the model says it
   lacked. This is what separates discipline from blindness.
 

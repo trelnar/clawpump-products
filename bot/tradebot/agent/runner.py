@@ -131,13 +131,15 @@ def research(candidates):
 
 
 def _plan_of(c):
-    """Keep only well-formed legs. A malformed plan becomes no plan, never a
-    surprise order."""
+    """Pair the two parallel arrays into legs, keeping only well-formed ones.
+    A malformed plan becomes no plan, never a surprise order."""
+    mults = c.get("profit_plan_multiples") or []
+    fracs = c.get("profit_plan_fractions") or []
     legs = []
-    for leg in (c.get("profit_plan") or []):
+    for mult, frac in zip(mults, fracs):     # zip drops any unpaired tail
         try:
-            mult, frac = float(leg["multiple"]), float(leg["sell_fraction"])
-        except (KeyError, TypeError, ValueError):
+            mult, frac = float(mult), float(frac)
+        except (TypeError, ValueError):
             continue
         if mult > 1 and 0 < frac <= 1:
             legs.append({"multiple": mult, "sell_fraction": frac})

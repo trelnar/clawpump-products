@@ -9,6 +9,7 @@ cleanly where a dependency is not installed (this suite must stay runnable
 without credentials or network).
 """
 import inspect
+import json
 import os
 import sys
 import tempfile
@@ -123,6 +124,54 @@ class AggregatorPayloadContract(unittest.TestCase):
         self.assertIn("mint", acct)
         for f in ("amount", "decimals", "uiAmount"):
             self.assertIn(f, acct["tokenAmount"])
+
+
+class ForecastSchemaBudget(unittest.TestCase):
+    """The structured-output compiler rejects schemas past a complexity limit
+    with a 400. On 2026-09-04 an added array-of-objects crossed it and the
+    research layer produced nothing for two hours. Keep the schema inside a
+    budget so that failure is a red test, not a silent outage."""
+
+    def setUp(self):
+        from tradebot.agent import prompts
+        self.schema = prompts.FORECAST_SCHEMA
+
+    @staticmethod
+    def _depth(node, d=0):
+        if isinstance(node, dict):
+            return max([ForecastSchemaBudget._depth(v, d + 1) for v in node.values()] or [d])
+        if isinstance(node, list):
+            return max([ForecastSchemaBudget._depth(v, d + 1) for v in node] or [d])
+        return d
+
+    def test_no_array_of_objects_below_the_candidate(self):
+        # This is the shape that broke it. Parallel scalar arrays instead.
+        props = self.schema["properties"]["candidates"]["items"]["properties"]
+        for name, spec in props.items():
+            if spec.get("type") == "array":
+                self.assertNotEqual(spec.get("items", {}).get("type"), "object",
+                                    f"{name} nests objects inside an array")
+
+    def test_depth_stays_within_budget(self):
+        self.assertLessEqual(self._depth(self.schema), 8)
+
+    def test_size_stays_within_budget(self):
+        self.assertLess(len(json.dumps(self.schema)), 6000)
+
+    def test_every_schema_field_is_actually_read(self):
+        # A field the model fills and nothing consumes is pure cost.
+        import inspect
+        from tradebot.agent import runner
+        src = inspect.getsource(runner)
+        ignore = {"p3x", "p5x", "p10x", "confidence", "target_2x", "hype_driver",
+                  "manipulation_notes", "trigger", "predicted_window", "pass_reason",
+                  "missing_evidence", "wave_timeframe", "wave_count",
+                  "wave_confidence_state", "wave_confirmation_level",
+                  "completed_five_risk"}   # journaled wholesale via evidence_state
+        for name in self.schema["properties"]["candidates"]["items"]["properties"]:
+            if name in ignore:
+                continue
+            self.assertIn(f'"{name}"', src, f"schema field {name} is never read")
 
 
 class ConfigCoherence(unittest.TestCase):
