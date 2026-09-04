@@ -3,10 +3,16 @@ deleted; corrections are new rows. Every skill writes here."""
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 
 from . import config
+
+# Events go to SQLite for the record and to stdout for the operator: systemd
+# captures stdout, so `journalctl -u tradebot-core` is where a human looks
+# first when something has gone wrong at 3am.
+_QUIET = {"agent_usage"}
 
 _lock = threading.Lock()
 _conn = None
@@ -87,7 +93,24 @@ def now():
     return time.time()
 
 
+def echo(kind, asset_id=None, detail=None):
+    """Mirror one line to stdout. Never raises: logging must not break trading."""
+    if kind in _QUIET:
+        return
+    try:
+        stamp = time.strftime("%H:%M:%S", time.gmtime())
+        bits = [stamp, kind]
+        if asset_id:
+            bits.append(str(asset_id))
+        if detail not in (None, ""):
+            bits.append(str(detail)[:400])
+        print(" | ".join(bits), file=sys.stdout, flush=True)
+    except Exception:
+        pass
+
+
 def log_event(kind, asset_id=None, detail=None):
+    echo(kind, asset_id, detail)
     return _insert("events", {"ts": now(), "kind": kind, "asset_id": asset_id,
                               "detail": json.dumps(detail) if isinstance(detail, (dict, list)) else detail})
 
@@ -104,6 +127,8 @@ def log_order(**kw):
 
 def log_fill(**kw):
     kw.setdefault("ts", now())
+    echo("FILL", kw.get("asset_id"),
+         f"{kw.get('side')} qty={kw.get('qty')} px={kw.get('price')} @{kw.get('venue')}")
     return _insert("fills", kw)
 
 
@@ -113,6 +138,7 @@ def log_approval(**kw):
 
 
 def log_alert(kind, body, asset_id=None, delivered=1):
+    echo(f"ALERT/{kind}", asset_id, f"{'sent' if delivered else 'UNDELIVERED'}: {body}")
     return _insert("alerts", {"ts": now(), "kind": kind, "asset_id": asset_id,
                               "body": body, "delivered": delivered})
 

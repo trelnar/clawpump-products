@@ -519,6 +519,23 @@ class AddSemantics(Base):
         self.assertAlmostEqual(pos["invalidation_price"], 0.09)
 
 
+class ApprovalIsNonBlocking(Base):
+    """The kill switch lives on the listener thread; a tap must not occupy it."""
+
+    def test_the_tap_only_queues_and_the_core_loop_executes(self):
+        from tradebot import core
+        ran = []
+        self.patch(execution, "execute_approved",
+                   lambda t, v, f: ran.append(t["asset_id"]) or "filled")
+        tid = state.add_ticket(asset_id="cex:QUE-USD", venue="coinbase", chain=None,
+                               action="BUY_NOW", notional_usd=5.0)
+        core.on_approved_buy({"ticket_id": tid})
+        self.assertEqual(ran, [])                      # nothing executed on the tap
+        self.assertIn(tid, [t["ticket_id"] for t in state.tickets("approved")])
+        core.run_approved_tickets(1000.0, True)
+        self.assertEqual(ran, ["cex:QUE-USD"])         # the core loop did it
+
+
 class TelegramPoller(Base):
     def setUp(self):
         super().setUp()

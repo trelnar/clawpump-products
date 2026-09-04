@@ -37,6 +37,11 @@ BASE_RPC = env("BASE_RPC", "https://mainnet.base.org")
 DB_PATH = env("TRADEBOT_DB", "/var/lib/tradebot/tradebot.db")
 
 # --- hard limits (risk-limits skill; NOT overridable at runtime) ------------
+# HONESTY NOTE: these numbers were chosen, not derived. Nothing in this system
+# has ever validated them against a realised loss distribution -- there is no
+# outcome data yet (see journal.outcomes). They are enforced strictly, which
+# makes them look better-founded than they are. Treat them as placeholders
+# pending calibration, not as settled policy.
 MAX_POSITION_PCT = 0.05          # hard limit 1: 5% of portfolio per position
 HALT_DRAWDOWN_PCT = 0.20         # hard limit 2: 20% off trailing-24h peak
 HALT_WINDOW_SEC = 24 * 3600
@@ -47,7 +52,11 @@ MAX_AGGREGATE_DEPLOYED_PCT = 0.50
 MAX_PER_VENUE_PCT = 0.50
 MAX_PER_CHAIN_PCT = 0.30
 MAX_CORRELATION_GROUP_PCT = 0.15
-MAX_SINGLE_ORDER_PCT = 0.025     # fat-finger: single order notional cap
+# Equal to MAX_POSITION_PCT by design: this check exists to catch a
+# mis-computed order, not to enforce sizing policy. At 2.5% it silently made
+# the position cap unreachable -- every phase-4 order was rejected as a fat
+# finger, and phase 3 passed only by landing exactly on the boundary.
+MAX_SINGLE_ORDER_PCT = 0.05      # fat-finger: single order notional cap
 MAX_PRICE_DEVIATION = 0.05       # fat-finger: vs reference price
 SLIPPAGE_TIERS = {"deep": 0.0025, "liquid": 0.0075, "thin": 0.015, "micro": 0.03}
 MAX_BOOK_DEPTH_SHARE = 0.10      # order notional vs visible depth
@@ -55,6 +64,9 @@ MAX_POOL_SHARE = 0.01            # swap notional vs pool liquidity
 EXIT_SAFETY_MAX_TAX = 0.10       # max transfer tax
 EXIT_SAFETY_FRESH_SEC = 600      # exit-safety check freshness
 TICKET_MAX_AGE_SEC = 900         # BUY NOW ticket max research age
+WHITELIST_TTL_SEC = 7 * 86400    # an approval authorises this asset for 1 week
+WHITELIST_MAX_REENTRIES = 3      # re-entries per approval before re-asking
+WHITELIST_REAPPROVE_AFTER_LOSS = True   # a losing exit ends the authorisation
 APPROVAL_EXPIRY_SEC = 1800       # standard approval expiry
 APPROVAL_EXPIRY_FAST_SEC = 600   # high-velocity approval expiry
 GATE_TIME_BUDGET_SEC = 5

@@ -18,8 +18,12 @@ def status_text():
         lines.append(f"{p['asset_id']}: qty {p['qty']:.4g} cost ${p['cost_basis_usd']:.2f}"
                      + (f" pnl ${pnl:+.2f}" if pnl is not None else " (no mark)"))
     pend = journal.query("SELECT COUNT(*) c FROM pending_approvals WHERE status='pending'")
-    lines.append(f"Whitelist: {len(journal.query('SELECT 1 FROM whitelist WHERE revoked_ts IS NULL'))}"
-                 f"  Pending approvals: {pend[0]['c']}")
+    live = journal.query("SELECT asset_id FROM whitelist WHERE revoked_ts IS NULL")
+    lines.append(f"Approved ({len(live)}):")
+    for w in live:
+        ok, why = state.whitelist_state(w["asset_id"])
+        lines.append(f"  {w['asset_id']}: {why}" + ("" if ok else " [inactive]"))
+    lines.append(f"Pending approvals: {pend[0]['c']}")
     return "\n".join(lines)
 
 
@@ -40,17 +44,28 @@ def why_text(asset):
 
 
 def on_approved_buy(pending):
-    """YES on a buy code. The approval satisfies gate 5 and nothing else: the
-    full gate sequence runs again against the state at the moment of the tap."""
-    t = journal.query("SELECT * FROM tickets WHERE ticket_id=?", (pending["ticket_id"],))
-    if not t:
+    """YES on a buy code -- called ON THE TELEGRAM LISTENER THREAD.
+
+    It must return immediately. Executing here would block the listener for the
+    length of a fill (a Base buy is ~285s worst case: 90s approve + 180s swap +
+    settle reads), and for that whole window STOP and FLATTEN cannot reach the
+    bot, while supervise_telegram -- seeing no successful poll -- would
+    eventually halt trading because you approved a buy. So the tap only marks
+    the ticket; the core loop does the work."""
+    if not pending.get("ticket_id"):
         return
-    ticket = t[0]
-    value, fresh = monitor.portfolio_value()
-    if execution.execute_approved(ticket, value, fresh) == "blocked":
-        alerts.ops(f"{ticket['asset_id']} approved but conditions changed since the "
-                   "alert. Not bought. It stays whitelisted and will auto-buy if it "
-                   "requalifies.")
+    state.set_ticket_status(pending["ticket_id"], "approved")
+    journal.log_event("buy_approved_queued", detail=str(pending["ticket_id"]))
+
+
+def run_approved_tickets(value, fresh):
+    """Core-loop side of an approval. Gates 1-4 run here against the state at
+    execution time, which may be minutes and one STOP later than the tap."""
+    for t in state.tickets("approved"):
+        if execution.execute_approved(t, value, fresh) == "blocked":
+            alerts.ops(f"{t['asset_id']} approved but conditions changed since the "
+                       "alert. Not bought. It stays approved and will auto-buy if it "
+                       "requalifies.")
 
 
 TG_HALT_SOURCE = "telegram_down"
@@ -99,10 +114,10 @@ def main():
     last = {"hb": 0, "value": 0, "monitor": 0, "tg": 0}
     while True:
         now = time.time()
+        due_hb = now - last["hb"] >= config.HEARTBEAT_SEC
+        if due_hb:
+            heartbeat.ping_start()
         try:
-            if now - last["hb"] >= config.HEARTBEAT_SEC:
-                heartbeat.ping()
-                last["hb"] = now
             if now - last["tg"] >= config.TELEGRAM_WATCHDOG_SEC:
                 supervise_telegram(holder, cmds.handle)
                 last["tg"] = now
@@ -112,6 +127,7 @@ def main():
             if now - last["value"] >= config.VALUE_SAMPLE_SEC:
                 value, fresh = monitor.portfolio_tick()
                 last["value"] = now
+                run_approved_tickets(value, fresh)
                 # pick up new tickets from the agent layer
                 for t in state.tickets("new"):
                     if t["action"] in ("BUY_NOW", "ADD"):
@@ -125,6 +141,13 @@ def main():
                         state.set_ticket_status(t["ticket_id"], "done")
         except Exception as e:
             journal.log_event("core_loop_error", detail=repr(e))
+            if due_hb:
+                heartbeat.fail(repr(e))   # a loop that raised is not healthy
+                last["hb"] = now
+        else:
+            if due_hb:
+                heartbeat.ping()          # green only after the work is done
+                last["hb"] = now
         time.sleep(1)
 
 

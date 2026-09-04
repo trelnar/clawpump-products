@@ -207,10 +207,37 @@ def set_cash(venue, usd):
 
 
 # --- whitelist --------------------------------------------------------------
-def is_whitelisted(asset_id):
+def whitelist_entry(asset_id):
     r = journal.query(
-        "SELECT 1 FROM whitelist WHERE asset_id=? AND revoked_ts IS NULL", (asset_id,))
-    return bool(r)
+        "SELECT * FROM whitelist WHERE asset_id=? AND revoked_ts IS NULL", (asset_id,))
+    return r[0] if r else None
+
+
+def whitelist_state(asset_id):
+    """(authorised, reason). An approval is a bounded grant, not a permanent
+    one: it expires, it caps re-entries, and a losing exit ends it. Without
+    bounds a single tap authorised every future purchase of that asset, under
+    conditions the approver never saw."""
+    e = whitelist_entry(asset_id)
+    if not e:
+        return False, "not approved"
+    age = time.time() - (e.get("approved_ts") or 0)
+    if age > config.WHITELIST_TTL_SEC:
+        return False, f"approval expired ({age / 86400:.1f}d old)"
+    used = int(get_kv(f"reentries:{asset_id}", "0") or 0)
+    if used >= config.WHITELIST_MAX_REENTRIES:
+        return False, f"re-entry cap reached ({used})"
+    return True, f"approved, {(config.WHITELIST_TTL_SEC - age) / 86400:.1f}d left"
+
+
+def is_whitelisted(asset_id):
+    return whitelist_state(asset_id)[0]
+
+
+def note_reentry(asset_id):
+    used = int(get_kv(f"reentries:{asset_id}", "0") or 0) + 1
+    set_kv(f"reentries:{asset_id}", used)
+    return used
 
 
 def whitelist_add(asset_id, venue_or_chain):
@@ -220,6 +247,7 @@ def whitelist_add(asset_id, venue_or_chain):
             "ON CONFLICT(asset_id) DO UPDATE SET revoked_ts=NULL, approved_ts=excluded.approved_ts",
             (asset_id, venue_or_chain, time.time()))
         journal.conn().commit()
+    set_kv(f"reentries:{asset_id}", 0)   # a fresh approval resets the budget
     journal.log_event("whitelist_add", asset_id)
 
 

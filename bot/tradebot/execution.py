@@ -378,6 +378,13 @@ def execute_sell(asset_id, reason, fraction=1.0):
     cost_part = pos["cost_basis_usd"] * sold_share
     pnl = proceeds - cost_part
     if sold_share >= 0.999:
+        if config.WHITELIST_REAPPROVE_AFTER_LOSS and pnl < 0:
+            state.whitelist_revoke(asset_id)
+            journal.log_event("whitelist_ended_on_loss", asset_id, {"pnl": round(pnl, 2)})
+            alerts.ops(f"{asset_id} exited at a loss (${pnl:.2f}). Its approval is "
+                       "withdrawn; a new buy will ask you again.")
+        else:
+            state.note_reentry(asset_id)
         state.close_position(asset_id)
     else:
         state.upsert_position(asset_id, venue, chain, -qty, -cost_part)
