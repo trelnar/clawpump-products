@@ -46,7 +46,10 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).
-- **Trades executed to date: zero.**
+- **First round trip executed 2026-09-04 23:34** — $5 of BTC-USDC bought and sold on
+Coinbase through the bot's own code path. Cash returned to $275.35 exactly. `execute_sell`
+has now sold something, which no amount of review could establish. Solana and Base
+round trips still outstanding.
 
 Credentials live in `/etc/tradebot/secrets.env` (Telegram token, healthchecks URL, Coinbase
 CDP key + secret, Anthropic key). Wallet keys in `/etc/tradebot/`. **No backups of any of it.**

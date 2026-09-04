@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402
 _env.load()          # systemd gives the daemons their env; a script must load its own
 
-from tradebot import config, execution, journal, marketdata, state  # noqa: E402
+from tradebot import (alerts, config, execution, journal,  # noqa: E402
+                      marketdata, state, telegram)
 from tradebot.exchanges import evm_dex, solana_dex  # noqa: E402
 
 # Liquid, boring, always exitable. Not what the bot hunts -- that is the point.
@@ -59,11 +60,8 @@ def venue_truth(t):
             raw, dec = evm_dex.token_balance(t["asset"].split(":", 1)[1])
             return raw / (10 ** dec) if dec else raw
         from tradebot.exchanges import coinbase
-        product = t["asset"].split(":", 1)[1].rsplit("-", 1)[0]
-        for a in coinbase._to_dict(coinbase.client().get_accounts(limit=250)).get("accounts", []):
-            if a.get("currency") == product:
-                return float((a.get("available_balance") or {}).get("value") or 0)
-        return 0.0
+        base = t["asset"].split(":", 1)[1].rsplit("-", 1)[0]
+        return coinbase.balances().get(base, 0.0)
     except Exception as e:
         return f"<unreadable: {e}>"
 
@@ -78,6 +76,7 @@ def main():
     a = ap.parse_args()
 
     state.init()
+    alerts.bind_sender(telegram.send)   # else every alert logs UNDELIVERED
     t = dict(TARGETS[a.venue])
     if a.product and a.venue == "coinbase":
         t["asset"] = f"cex:{a.product}"

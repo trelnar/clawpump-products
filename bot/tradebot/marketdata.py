@@ -19,9 +19,29 @@ def _get(url, **kw):
 
 # --- prices -----------------------------------------------------------------
 def coinbase_spot(product_id):
-    """Public ticker, no auth. product_id like 'SOL-USDC'."""
-    j = _get(f"https://api.exchange.coinbase.com/products/{product_id}/ticker")
-    return float(j["price"])
+    """Public ticker first, the authenticated product book as fallback.
+
+    The public Exchange ticker 400s for products that exist only on Advanced
+    Trade -- BTC-USDC among them. With discovery now restricted to USDC quotes,
+    relying on it alone would have failed gate 2 with `stale_data` on every
+    ticket: the bot would have proposed trades and then rejected all of them as
+    unpriceable. The core holds Coinbase credentials and can ask the venue
+    directly; the agent holds none, and its caller tolerates a None."""
+    try:
+        j = _get(f"https://api.exchange.coinbase.com/products/{product_id}/ticker")
+        return float(j["price"])
+    except Exception as e:
+        first = e
+    try:
+        from .exchanges import coinbase
+        bid, ask = coinbase.best_price(product_id)
+        if bid and ask:
+            return (bid + ask) / 2
+        if bid or ask:
+            return bid or ask
+    except Exception:
+        pass
+    raise first
 
 
 def dexscreener_token(chain, address):
