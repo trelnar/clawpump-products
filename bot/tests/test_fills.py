@@ -155,6 +155,47 @@ class BaseChainBuy(Base):
         self.assertAlmostEqual(state.get_position("base:0xTOK2")["qty"], 2.0)
 
 
+class VenuePrecision(Base):
+    """The first real Coinbase order was rejected with INVALID_PRICE_PRECISION:
+    a limit price formatted with %.8g gave BTC-USD three decimals against a
+    0.01 tick. Price and size must be quantised to the product's increments."""
+
+    def setUp(self):
+        super().setUp()
+        coinbase._products["BTC-USD"] = {
+            "quote_increment": "0.01", "base_increment": "0.00000001",
+            "base_min_size": "0.00000001", "quote_min_size": "1"}
+        coinbase._products["COARSE-USD"] = {
+            "quote_increment": "0.5", "base_increment": "0.1",
+            "base_min_size": "1", "quote_min_size": "10"}
+        self.addCleanup(coinbase._products.clear)
+
+    def test_a_buy_price_rounds_up_to_the_tick(self):
+        self.assertEqual(coinbase.fmt_price("BTC-USD", 79880.6153), "79880.62")
+
+    def test_a_price_already_on_the_tick_is_unchanged(self):
+        self.assertEqual(coinbase.fmt_price("BTC-USD", 79880.62), "79880.62")
+
+    def test_size_rounds_down_never_up(self):
+        self.assertEqual(coinbase.fmt_size("COARSE-USD", 3.99), "3.9")
+
+    def test_a_coarse_tick_is_respected(self):
+        self.assertEqual(coinbase.fmt_price("COARSE-USD", 100.2), "100.5")
+
+    def test_no_float_artefacts_in_the_output(self):
+        for v in (0.1 + 0.2, 1e-8, 123456.785):
+            self.assertNotIn("e", coinbase.fmt_price("BTC-USD", v).lower())
+
+    def test_a_sub_minimum_order_is_refused_before_it_is_sent(self):
+        with self.assertRaises(RuntimeError):
+            coinbase.check_min_size("COARSE-USD", "0.5", 50.0)     # below base min
+        with self.assertRaises(RuntimeError):
+            coinbase.check_min_size("COARSE-USD", "5", 5.0)        # below quote min
+
+    def test_a_valid_order_passes(self):
+        coinbase.check_min_size("BTC-USD", "0.00006", 5.0)
+
+
 class PlacementIdentity(Base):
     """list_orders has no client_order_id filter, so the only handle on an order
     we placed is the order_id the venue returns at placement."""
@@ -187,6 +228,13 @@ class CoinbaseBuy(Base):
         if value is not None:
             o["filled_value"] = str(value)
         return o
+
+    def setUp(self):
+        super().setUp()
+        coinbase._products["AAA-USD"] = coinbase._products["BBB-USD"] = \
+            coinbase._products["VVV-USD"] = coinbase._products["IDD-USD"] = {
+                "quote_increment": "0.01", "base_increment": "0.00000001"}
+        self.addCleanup(coinbase._products.clear)
 
     def test_books_the_actual_fill_not_the_intent(self):
         self.patch(coinbase, "best_price", lambda p: (1.49, 1.5))

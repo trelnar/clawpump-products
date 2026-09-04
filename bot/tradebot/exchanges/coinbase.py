@@ -1,6 +1,7 @@
 """execution venue: Coinbase Advanced Trade via the official SDK. Trade-only
 CDP key scoped to the HypeBot portfolio; withdrawal disabled; IP-allowlisted."""
 import uuid
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from .. import config, journal
 
@@ -28,6 +29,57 @@ def usdc_balance():
         if a.get("currency") in ("USDC", "USD"):
             total += float((a.get("available_balance") or {}).get("value") or 0)
     return total
+
+
+_products = {}
+
+
+def product(product_id):
+    """Cached product metadata. Every venue quantises price and size to its own
+    increments and rejects anything finer -- the first real order was refused
+    with INVALID_PRICE_PRECISION for sending BTC-USD three decimals."""
+    if product_id not in _products:
+        r = _to_dict(client().get_product(product_id=product_id))
+        _products[product_id] = r.get("product") or r
+    return _products[product_id]
+
+
+def _quantise(value, increment, rounding):
+    """Snap to a venue increment. Decimal, not float: 0.1 + 0.2 arithmetic is
+    how an order comes back one satoshi over the tick and gets rejected."""
+    try:
+        step = Decimal(str(increment))
+    except Exception:
+        step = Decimal("0")
+    d = Decimal(str(value))
+    if step <= 0:
+        return format(d.normalize(), "f")
+    return format((d / step).quantize(Decimal("1"), rounding=rounding) * step, "f")
+
+
+def fmt_price(product_id, price):
+    """Round a limit price UP to the tick: for a buy, up is the marketable side."""
+    p = product(product_id)
+    return _quantise(price, p.get("quote_increment") or p.get("price_increment") or "0.01",
+                     ROUND_UP)
+
+
+def fmt_size(product_id, size):
+    """Round a base size DOWN: never order more than intended."""
+    return _quantise(size, product(product_id).get("base_increment") or "0.00000001",
+                     ROUND_DOWN)
+
+
+def check_min_size(product_id, base_size, notional_usd):
+    """A sub-minimum order is refused by the venue, and a sub-minimum REMAINDER
+    after a partial exit is unsellable by any automated path."""
+    p = product(product_id)
+    base_min = float(p.get("base_min_size") or 0)
+    quote_min = float(p.get("quote_min_size") or 0)
+    if base_min and float(base_size) < base_min:
+        raise RuntimeError(f"size {base_size} below {product_id} minimum {base_min}")
+    if quote_min and notional_usd and notional_usd < quote_min:
+        raise RuntimeError(f"${notional_usd:.2f} below {product_id} minimum ${quote_min}")
 
 
 def best_price(product_id):
@@ -60,12 +112,14 @@ def _placed(client_oid, resp):
 
 def limit_buy(product_id, notional_usd, limit_price):
     oid = f"tb-{uuid.uuid4().hex[:20]}"
-    size = f"{notional_usd / limit_price:.8f}"
+    price = fmt_price(product_id, limit_price)
+    size = fmt_size(product_id, notional_usd / float(price))
+    check_min_size(product_id, size, notional_usd)
     journal.log_order(client_oid=oid, venue="coinbase", asset_id=f"cex:{product_id}",
-                      side="buy", notional_usd=notional_usd, limit_price=limit_price,
+                      side="buy", notional_usd=notional_usd, limit_price=float(price),
                       status="submitted", detail=None)
     r = _to_dict(client().limit_order_gtc_buy(client_order_id=oid, product_id=product_id,
-                                              base_size=size, limit_price=f"{limit_price:.8g}"))
+                                              base_size=size, limit_price=price))
     return _placed(oid, r)
 
 
@@ -74,9 +128,11 @@ def limit_sell(product_id, qty, limit_price):
     journal.log_order(client_oid=oid, venue="coinbase", asset_id=f"cex:{product_id}",
                       side="sell", notional_usd=qty * limit_price, limit_price=limit_price,
                       status="submitted", detail=None)
-    r = _to_dict(client().limit_order_gtc_sell(client_order_id=oid, product_id=product_id,
-                                               base_size=f"{qty:.8f}",
-                                               limit_price=f"{limit_price:.8g}"))
+    r = _to_dict(client().limit_order_gtc_sell(
+        client_order_id=oid, product_id=product_id,
+        base_size=fmt_size(product_id, qty),
+        limit_price=_quantise(limit_price, product(product_id).get("quote_increment")
+                              or "0.01", ROUND_DOWN)))
     return _placed(oid, r)
 
 
@@ -87,7 +143,7 @@ def market_sell(product_id, qty):
                       side="sell", notional_usd=None, limit_price=None,
                       status="submitted_market", detail=None)
     r = _to_dict(client().market_order_sell(client_order_id=oid, product_id=product_id,
-                                            base_size=f"{qty:.8f}"))
+                                            base_size=fmt_size(product_id, qty)))
     return _placed(oid, r)
 
 
