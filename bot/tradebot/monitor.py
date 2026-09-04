@@ -59,6 +59,7 @@ def check_positions():
             continue
         if run_profit_plan(p, price):
             continue
+        time_stop_check(p)
         # liquidity deterioration on tokens
         if p.get("chain") in ("solana", "base") and p.get("entry_liquidity_usd"):
             addr = asset.split(":", 1)[1]
@@ -73,7 +74,80 @@ def check_positions():
                     state.set_kv(f"reeval:{asset}", str(time.time()))
 
 
+def reconcile_positions():
+    """Compare the books against what the venues actually hold, both ways.
+
+    Alert only -- never trades on its own. Every orphan bug found in either
+    audit failed in the same direction: real assets existing that the database
+    does not know about, each becoming a permanent loss rather than a logged
+    anomaly. This is the mechanism that would have caught them as anomalies."""
+    from .exchanges import evm_dex, solana_dex
+    from . import alerts
+    problems = []
+    booked = {p["asset_id"]: p for p in state.positions()}
+
+    # 1. every book entry still backed by real tokens
+    for asset, p in booked.items():
+        chain = p.get("chain")
+        if chain not in ("solana", "base"):
+            continue
+        addr = asset.split(":", 1)[1]
+        try:
+            raw, dec = (solana_dex.token_balance(addr) if chain == "solana"
+                        else evm_dex.token_balance(addr))
+        except Exception as e:
+            journal.log_event("recon_position_fetch_fail", asset, str(e))
+            continue
+        held = raw / (10 ** dec) if dec else raw
+        want = p["qty"] or 0
+        if want <= 0:
+            continue
+        drift = abs(held - want) / want
+        if drift > config.POSITION_DRIFT_PCT:
+            problems.append(f"{asset}: books {want:.6g}, wallet {held:.6g} "
+                            f"({drift:.0%} off)")
+
+    # 2. tokens held that no position row claims
+    try:
+        for mint, amount in solana_dex.all_token_balances().items():
+            if mint == solana_dex.USDC_MINT:
+                continue
+            if f"solana:{mint}" not in booked:
+                problems.append(f"UNTRACKED solana:{mint}: wallet holds {amount:.6g}")
+    except Exception as e:
+        journal.log_event("recon_orphan_scan_fail", detail=str(e))
+
+    if problems:
+        journal.log_event("position_recon_mismatch", detail=problems)
+        alerts.ops("POSITION MISMATCH — books disagree with the wallets:\n"
+                   + "\n".join(problems[:10])
+                   + "\nNo automatic action taken. Verify before trading.")
+    return problems
+
+
+def time_stop_check(p, now=None):
+    """A position past its thesis window with no move is capital held against a
+    prediction that did not happen. Flags for model reassessment; never sells
+    on its own -- the strategy skill forbids a mechanical time exit."""
+    now = time.time() if now is None else now
+    entry_ts = p.get("entry_ts")
+    if entry_ts is None:          # not `or` -- a 0 timestamp is a value, not a miss
+        return False
+    age = now - entry_ts
+    limit = config.TIME_STOP_DEFAULT_SEC * config.TIME_STOP_SLACK
+    if age < limit:
+        return False
+    key = f"timestop:{p['asset_id']}"
+    if state.get_kv(key):
+        return False
+    state.set_kv(key, int(now))
+    journal.log_event("time_stop", p["asset_id"], {"age_hours": round(age / 3600, 1)})
+    state.set_kv(f"reeval:{p['asset_id']}", str(now))
+    return True
+
+
 _last_recon = [0.0]
+_last_pos_recon = [0.0]
 
 
 def reconcile_cash():

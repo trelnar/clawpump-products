@@ -33,6 +33,8 @@ EVM_KEYFILE = env("EVM_KEYFILE", "/etc/tradebot/evm_wallet.key")
 SOLANA_RPC = env("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 BASE_RPC = env("BASE_RPC", "https://mainnet.base.org")
 
+LOG_STDOUT = env("TRADEBOT_LOG_STDOUT", "1") not in ("0", "false", "")
+
 # --- paths ------------------------------------------------------------------
 DB_PATH = env("TRADEBOT_DB", "/var/lib/tradebot/tradebot.db")
 
@@ -87,6 +89,13 @@ SETTLE_READ_TRIES = 5            # balance re-reads after a confirmed swap
 SETTLE_READ_SLEEP_SEC = 3
 TELEGRAM_STALE_SEC = 300         # no successful poll for this long -> SELL_ONLY
 TELEGRAM_WATCHDOG_SEC = 30       # how often the core checks the poller
+TRACK_WINDOW_SEC = 72 * 3600     # forecast resolution horizon (1-3 day thesis)
+TRACK_BATCH = 60                 # forecasts sampled per pass
+TRACK_INTERVAL_SEC = 900
+RECON_POSITIONS_SEC = 1800       # position-vs-venue reconciliation
+POSITION_DRIFT_PCT = 0.02        # book vs venue mismatch worth alerting on
+TIME_STOP_SLACK = 1.5            # reassess at this multiple of the predicted window
+TIME_STOP_DEFAULT_SEC = 72 * 3600
 LIQ_DRAIN_WARN = 0.30            # pool liquidity down vs entry -> urgent reeval
 LIQ_DRAIN_EXIT = 0.50            # -> exit evaluation, default exit
 
@@ -97,3 +106,14 @@ PHASE1_ORDER_USD = 5.0           # venue-minimum sizing for phase 1
 
 VENUES = {"coinbase": "cex", "solana": "chain", "base": "chain"}
 CHAIN_GAS_TOKEN = {"solana": "SOL", "base": "ETH"}
+
+# --- transaction safety -----------------------------------------------------
+# Both DEX paths sign transactions built by a third party. Simulate first and
+# refuse anything that reverts; allowlist the contract we grant approval to.
+SIMULATE_BEFORE_SEND = env("SIMULATE_BEFORE_SEND", "1") not in ("0", "false", "")
+EVM_ROUTER_ALLOWLIST = [
+    a.strip() for a in env(
+        "EVM_ROUTER_ALLOWLIST",
+        "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5"  # KyberSwap MetaAggregationRouterV2
+    ).split(",") if a.strip()
+]

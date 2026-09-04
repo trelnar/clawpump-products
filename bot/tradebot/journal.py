@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS discovery_inputs (
   input_id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL NOT NULL, asset_id TEXT, source TEXT, payload TEXT
 );
+CREATE TABLE IF NOT EXISTS forecast_tracking (
+  forecast_id INTEGER PRIMARY KEY, asset_id TEXT, action TEXT,
+  start_ts REAL, start_price REAL, max_price REAL, last_ts REAL, resolved INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_tracking_open ON forecast_tracking(resolved, start_ts);
 CREATE TABLE IF NOT EXISTS events (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL NOT NULL, kind TEXT NOT NULL, asset_id TEXT, detail TEXT
@@ -95,7 +100,7 @@ def now():
 
 def echo(kind, asset_id=None, detail=None):
     """Mirror one line to stdout. Never raises: logging must not break trading."""
-    if kind in _QUIET:
+    if kind in _QUIET or not config.LOG_STDOUT:
         return
     try:
         stamp = time.strftime("%H:%M:%S", time.gmtime())

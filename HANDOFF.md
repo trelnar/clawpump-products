@@ -140,7 +140,24 @@ are systematically optimistic for exactly the tokens this bot hunts.
 ## 4. How to operate it
 
 **Telegram** (@bandaidbot): `STATUS`, `STOP`, `RESUME`, `FLATTEN`, `REVOKE <asset>`,
-`REPORT`, `WHY <asset>`, `YES <code>` / `NO <code>`.
+`REPORT`, `SCORE [days]`, `GAPS [days]`, `WHY <asset>`, `YES <code>` / `NO <code>`.
+
+- `SCORE` — what forecasts predicted vs what happened, split by the action taken.
+  Empty until the first forecasts resolve (72h horizon).
+- `GAPS` — why it is not trading: PASS reasons, and the evidence the model says it
+  lacked. This is what separates discipline from blindness.
+
+**Commissioning test — do this before trusting it unattended:**
+```
+cd /opt/tradebot && python3 -m scripts.roundtrip coinbase   # then solana, then base
+```
+One real buy and sell per venue at $5, on a liquid asset you can always exit. It prints
+the books against what the venue actually holds at each step. `execute_sell` has never
+sold anything anywhere; this is the only thing that resolves that.
+
+**Sizing economics:** `python3 scripts/breakeven.py --capital 1000` — at $1,000 in phase 2,
+API cost is 64% of the total cost of trading and the break-even hit rate is ~42%. That
+number, not a percentage anyone picked, is the argument for more capital or fewer cycles.
 
 **On the VPS** (`ssh -i ~/.ssh/tradebot_ed25519 root@107.191.39.195`):
 ```
@@ -151,7 +168,10 @@ sqlite3 /var/lib/tradebot/tradebot.db "SELECT datetime(ts,'unixepoch'), kind, su
 ```
 
 **Tests**: `cd bot && python3 -m unittest discover -s tests` — no network, no credentials,
-runs anywhere. Add a case here for every fix that touches the order path.
+runs anywhere. 78 tests; 8 skip where the Coinbase SDK is absent, so run it on the VPS too.
+`test_contracts.py` checks the code against the *installed SDK* rather than against mocks —
+that is the class of check that would have caught the 2026-09-02 Coinbase critical, which
+33 green mock-based tests missed. Add a case for every fix that touches the order path.
 
 **Monitoring**: healthchecks.io (`tradebot-heartbeat`, 5 min period) alerts Telegram + email
 when the core stops pinging. Note the caveat in §3c — it can report green through a failure.

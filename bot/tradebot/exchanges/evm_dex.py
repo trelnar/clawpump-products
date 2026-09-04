@@ -96,6 +96,12 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
     rb.raise_for_status()
     data = rb.json()["data"]
     router = w3.to_checksum_address(data["routerAddress"])
+    # Kyber names the contract we are about to approve and call. Without an
+    # allowlist, a compromised aggregator response points both at an address
+    # of its choosing and we sign the approval for it.
+    if config.EVM_ROUTER_ALLOWLIST and router.lower() not in {
+            a.lower() for a in config.EVM_ROUTER_ALLOWLIST}:
+        raise RuntimeError(f"router not allowlisted: {router}")
 
     nonce = w3.eth.get_transaction_count(acct.address)
     if token_in != NATIVE:
@@ -113,6 +119,8 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
           "nonce": nonce, "chainId": CHAIN_ID,
           "gasPrice": w3.eth.gas_price}
     tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.2)
+    if config.SIMULATE_BEFORE_SEND:
+        w3.eth.call(tx)   # reverts here rather than costing gas on-chain
     signed = acct.sign_transaction(tx)
     h = w3.eth.send_raw_transaction(signed.raw_transaction).hex()
     journal.log_order(client_oid=h, venue="base",

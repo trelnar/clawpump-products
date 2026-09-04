@@ -6,7 +6,7 @@ import time
 from . import alerts, config, journal, state
 
 HELP = ("Unrecognized. Commands: YES <code>, NO <code>, REVOKE <asset>, STOP, "
-        "FLATTEN, RESUME, STATUS, REPORT, WHY <asset>")
+        "FLATTEN, RESUME, STATUS, REPORT, SCORE [days], WHY <asset>")
 
 
 def new_code():
@@ -75,6 +75,12 @@ class Commands:
             alerts.ops(f"Revoked {arg}. It will require approval again.")
         elif cmd == "STATUS" and not arg:
             alerts.ops(self.status_text())
+        elif cmd == "GAPS":
+            alerts.ops(self.gaps_text(arg) if hasattr(self, "gaps_text")
+                       else "Gap report unavailable.")
+        elif cmd == "SCORE":
+            alerts.ops(self.score_text(arg) if hasattr(self, "score_text")
+                       else "Scorecard unavailable.")
         elif cmd == "REPORT":
             alerts.ops(self.report_text(arg))
         elif cmd == "WHY" and arg:

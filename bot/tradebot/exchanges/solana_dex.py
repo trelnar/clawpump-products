@@ -61,6 +61,26 @@ def token_balance(mint):
     return amt, dec
 
 
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+
+def all_token_balances():
+    """Every non-zero SPL balance the wallet holds. Reconciliation needs to ask
+    'what do we actually own' -- not merely 'is what we think we own still
+    there' -- because the failures worth catching are holdings the database
+    does not know about at all."""
+    res = _rpc("getTokenAccountsByOwner",
+               [address(), {"programId": TOKEN_PROGRAM},
+                {"encoding": "jsonParsed", "commitment": "confirmed"}])
+    out = {}
+    for acct in res.get("value") or []:
+        info = acct["account"]["data"]["parsed"]["info"]
+        amt = info.get("tokenAmount") or {}
+        if int(amt.get("amount") or 0) > 0:
+            out[info["mint"]] = float(amt.get("uiAmount") or 0)
+    return out
+
+
 def token_decimals(mint):
     """Authoritative decimals from the mint account. token_balance() reports 0
     when no associated account exists yet, so raw->whole conversion cannot rely
@@ -106,8 +126,22 @@ def exit_safety(mint, notional_usd, max_tax=None):
     return ok, reason, measured
 
 
+def simulate(signed_tx_b64):
+    """Dry-run before broadcast. Jupiter builds the transaction and we sign it
+    blind otherwise -- a compromised or hijacked aggregator response would be
+    signed just as readily as a swap. A simulation that errors is a refusal."""
+    res = _rpc("simulateTransaction",
+               [signed_tx_b64, {"encoding": "base64", "commitment": "confirmed",
+                                "replaceRecentBlockhash": True}])
+    val = res.get("value") or {}
+    if val.get("err"):
+        raise RuntimeError(f"simulation failed: {val['err']} "
+                           f"{(val.get('logs') or [])[-3:]}")
+    return val
+
+
 def swap(input_mint, output_mint, amount_raw, slippage_bps):
-    """Quote -> signed VersionedTransaction -> send. Confirm by signature."""
+    """Quote -> signed VersionedTransaction -> simulate -> send."""
     from solders.transaction import VersionedTransaction
     kp = _keypair()
     q = quote(input_mint, output_mint, amount_raw, slippage_bps)
@@ -119,9 +153,11 @@ def swap(input_mint, output_mint, amount_raw, slippage_bps):
     tx_b64 = r.json()["swapTransaction"]
     tx = VersionedTransaction.from_bytes(base64.b64decode(tx_b64))
     signed = VersionedTransaction(tx.message, [kp])
+    raw_b64 = base64.b64encode(bytes(signed)).decode()
+    if config.SIMULATE_BEFORE_SEND:
+        simulate(raw_b64)   # raises, and the caller never broadcasts
     sig = _rpc("sendTransaction",
-               [base64.b64encode(bytes(signed)).decode(), {"encoding": "base64",
-                                                           "skipPreflight": False}])
+               [raw_b64, {"encoding": "base64", "skipPreflight": False}])
     journal.log_order(client_oid=sig, venue="solana",
                       asset_id=f"solana:{output_mint if input_mint == USDC_MINT else input_mint}",
                       side="buy" if input_mint == USDC_MINT else "sell",

@@ -2,8 +2,8 @@
 state, Telegram, monitoring, heartbeat. No model calls anywhere in here."""
 import time
 
-from . import (alerts, approval, config, execution, heartbeat, journal,
-               marketdata, monitor, state, telegram)
+from . import (alerts, approval, calibration, config, execution, heartbeat,
+               journal, marketdata, monitor, state, telegram)
 
 
 def status_text():
@@ -34,6 +34,22 @@ def report_text(arg=None):
                           "FROM fills WHERE ts>?", (day,))[0]
     return (f"REPORT 24h: forecasts {f}, fills {fills['c'] or 0} "
             f"(exits {fills['s'] or 0}). Mode {state.get_mode()}, phase {state.phase()}.")
+
+
+def score_text(arg=None):
+    try:
+        days = int(arg) if arg else 30
+    except (TypeError, ValueError):
+        days = 30
+    return calibration.scorecard(days)
+
+
+def gaps_text(arg=None):
+    try:
+        days = int(arg) if arg else 7
+    except (TypeError, ValueError):
+        days = 7
+    return calibration.gaps(days)
 
 
 def why_text(asset):
@@ -106,12 +122,14 @@ def main():
     journal.log_event("core_start")
     cmds = approval.Commands(on_approved_buy, execution.flatten_all,
                              status_text, report_text, why_text)
+    cmds.score_text = score_text
+    cmds.gaps_text = gaps_text
     alerts.bind_sender(telegram.send)
     holder = {"p": telegram.Poller(cmds.handle)}
     holder["p"].start()
     alerts.ops(f"bot-core started. Mode {state.get_mode()}, phase {state.phase()}.")
 
-    last = {"hb": 0, "value": 0, "monitor": 0, "tg": 0}
+    last = {"hb": 0, "value": 0, "monitor": 0, "tg": 0, "track": 0, "posrecon": 0}
     while True:
         now = time.time()
         due_hb = now - last["hb"] >= config.HEARTBEAT_SEC
@@ -124,6 +142,12 @@ def main():
             if now - last["monitor"] >= config.MONITOR_INTERVAL_TOKEN_SEC:
                 monitor.check_positions()
                 last["monitor"] = now
+            if now - last["track"] >= config.TRACK_INTERVAL_SEC:
+                calibration.tick()
+                last["track"] = now
+            if now - last["posrecon"] >= config.RECON_POSITIONS_SEC:
+                monitor.reconcile_positions()
+                last["posrecon"] = now
             if now - last["value"] >= config.VALUE_SAMPLE_SEC:
                 value, fresh = monitor.portfolio_tick()
                 last["value"] = now

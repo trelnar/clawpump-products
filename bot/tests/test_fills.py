@@ -13,10 +13,12 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+os.environ.setdefault("TRADEBOT_LOG_STDOUT", "0")
 os.environ.setdefault("TRADEBOT_DB", os.path.join(tempfile.mkdtemp(), "test.db"))
 
 from tradebot import (approval, config, execution, monitor,  # noqa: E402
                       state, telegram)
+from tradebot import calibration, monitor as _mon  # noqa: E402,F401
 from tradebot.agent import runner  # noqa: E402
 from tradebot.exchanges import coinbase, evm_dex, solana_dex  # noqa: E402
 
@@ -388,6 +390,7 @@ class SubmitRouting(Base):
     def setUp(self):
         super().setUp()
         self.patch(runner.marketdata, "marks", lambda a: ({}, True))
+        self.patch(runner.marketdata, "price", lambda a: 1.0)
         self.patch(runner.state, "total_value", lambda m: 1000.0)
         self.patch(runner.risk, "compute_size", lambda v: 5.0)
         for a in ("solana:HELD", "solana:GHOST"):
@@ -534,6 +537,79 @@ class ApprovalIsNonBlocking(Base):
         self.assertIn(tid, [t["ticket_id"] for t in state.tickets("approved")])
         core.run_approved_tickets(1000.0, True)
         self.assertEqual(ran, ["cex:QUE-USD"])         # the core loop did it
+
+
+class Calibration(Base):
+    """Every forecast is observed, not only the ones that became trades."""
+
+    def test_a_forecast_resolves_into_an_outcome(self):
+        from tradebot import journal
+        fid = journal.log_forecast({"asset_id": "solana:CAL1", "action": "PASS"})
+        calibration.open_tracking(fid, "solana:CAL1", "PASS", 1.0)
+        # it ran to 3x, then the window closed
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:CAL1": 3.0}, True))
+        calibration.tick()
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 0)
+        calibration.tick()
+        row = journal.query("SELECT * FROM outcomes WHERE forecast_id=?", (fid,))[0]
+        self.assertAlmostEqual(row["max_multiple"], 3.0)
+        self.assertEqual(row["hit_2x"], 1)
+        self.assertEqual(row["hit_5x"], 0)
+
+    def test_a_zero_start_price_is_not_tracked(self):
+        from tradebot import journal
+        fid = journal.log_forecast({"asset_id": "solana:CAL2", "action": "PASS"})
+        calibration.open_tracking(fid, "solana:CAL2", "PASS", 0)
+        self.assertEqual(
+            journal.query("SELECT * FROM forecast_tracking WHERE forecast_id=?", (fid,)), [])
+
+
+class TimeStop(Base):
+    def test_a_stale_position_is_flagged_once(self):
+        state.close_position("solana:OLD")
+        state.upsert_position("solana:OLD", "solana", "solana", 100.0, 5.0)
+        p = state.get_position("solana:OLD")
+        p["entry_ts"] = 0                      # ancient
+        self.assertTrue(_mon.time_stop_check(p))
+        self.assertFalse(_mon.time_stop_check(p))   # not re-flagged every tick
+
+    def test_a_fresh_position_is_not_flagged(self):
+        state.close_position("solana:NEW")
+        state.upsert_position("solana:NEW", "solana", "solana", 100.0, 5.0)
+        self.assertFalse(_mon.time_stop_check(state.get_position("solana:NEW")))
+
+
+class WhitelistBounds(Base):
+    def setUp(self):
+        super().setUp()
+        self.aid = "solana:WL1"
+        state.whitelist_revoke(self.aid)
+
+    def test_a_fresh_approval_authorises(self):
+        state.whitelist_add(self.aid, "solana")
+        self.assertTrue(state.is_whitelisted(self.aid))
+
+    def test_an_expired_approval_does_not(self):
+        state.whitelist_add(self.aid, "solana")
+        self.patch(config, "WHITELIST_TTL_SEC", 0)
+        ok, why = state.whitelist_state(self.aid)
+        self.assertFalse(ok)
+        self.assertIn("expired", why)
+
+    def test_the_reentry_cap_ends_authorisation(self):
+        state.whitelist_add(self.aid, "solana")
+        for _ in range(config.WHITELIST_MAX_REENTRIES):
+            state.note_reentry(self.aid)
+        ok, why = state.whitelist_state(self.aid)
+        self.assertFalse(ok)
+        self.assertIn("re-entry cap", why)
+
+    def test_reapproval_resets_the_budget(self):
+        state.whitelist_add(self.aid, "solana")
+        for _ in range(config.WHITELIST_MAX_REENTRIES):
+            state.note_reentry(self.aid)
+        state.whitelist_add(self.aid, "solana")
+        self.assertTrue(state.is_whitelisted(self.aid))
 
 
 class TelegramPoller(Base):

@@ -76,6 +76,18 @@ FORECAST_SCHEMA = {
                     "what": {"type": "string"},
                     "hype_driver": {"type": "string"},
                     "manipulation_notes": {"type": "string"},
+                    "pass_reason": {"type": "string",
+                        "description": ("Required when action is PASS. The specific "
+                                        "reason this candidate fails the 2x-in-1-3-days "
+                                        "test -- not a restatement of the rule. If you "
+                                        "would have wanted it with better evidence, say "
+                                        "so here rather than passing silently.")},
+                    "missing_evidence": {"type": "array", "items": {"type": "string"},
+                        "description": ("Evidence the strategy asks for that this "
+                                        "payload did not contain and that would have "
+                                        "changed your answer. Be specific: 'holder "
+                                        "growth', 'social velocity', '5m candles'. "
+                                        "Empty when the data was sufficient to decide.")},
                     "trigger": {"type": "string"},
                     "wave_timeframe": {"type": "string",
                         "description": "Timeframe the count belongs to, or empty when no candles were supplied"},
