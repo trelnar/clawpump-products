@@ -35,7 +35,7 @@ from tradebot.exchanges import evm_dex, solana_dex  # noqa: E402
 
 # Liquid, boring, always exitable. Not what the bot hunts -- that is the point.
 TARGETS = {
-    "coinbase": {"asset": "cex:BTC-USD", "venue": "coinbase", "chain": None},
+    "coinbase": {"asset": "cex:BTC-USDC", "venue": "coinbase", "chain": None},
     "solana": {"asset": "solana:So11111111111111111111111111111111111111112",
                "venue": "solana", "chain": "solana"},          # wrapped SOL
     "base": {"asset": "base:0x4200000000000000000000000000000000000006",
@@ -59,7 +59,7 @@ def venue_truth(t):
             raw, dec = evm_dex.token_balance(t["asset"].split(":", 1)[1])
             return raw / (10 ** dec) if dec else raw
         from tradebot.exchanges import coinbase
-        product = t["asset"].split(":", 1)[1].split("-")[0]
+        product = t["asset"].split(":", 1)[1].rsplit("-", 1)[0]
         for a in coinbase._to_dict(coinbase.client().get_accounts(limit=250)).get("accounts", []):
             if a.get("currency") == product:
                 return float((a.get("available_balance") or {}).get("value") or 0)

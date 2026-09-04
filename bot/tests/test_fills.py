@@ -155,6 +155,40 @@ class BaseChainBuy(Base):
         self.assertAlmostEqual(state.get_position("base:0xTOK2")["qty"], 2.0)
 
 
+class QuoteCurrency(Base):
+    """A BTC-USD order cannot spend USDC. The first real order was refused with
+    INSUFFICIENT_FUND while the books showed $275 of cash -- all of it USDC."""
+
+    def test_the_quote_currency_comes_from_the_product(self):
+        self.assertEqual(execution.asset_quote_currency("cex:BTC-USDC"), "USDC")
+        self.assertEqual(execution.asset_quote_currency("cex:BTC-USD"), "USD")
+        self.assertEqual(execution.asset_quote_currency("cex:1INCH-USDC"), "USDC")
+
+    def test_a_buy_in_a_currency_we_do_not_hold_is_blocked(self):
+        self.patch(coinbase, "balances", lambda: {"USDC": 275.0, "USD": 0.0})
+        self.patch(execution.marketdata, "price", lambda a: 1.0)
+        self.patch(execution.risk, "check_buy", lambda *a, **k: None)
+        state.set_mode("NORMAL", reason="test")
+        t = ticket("cex:BTC-USD", "coinbase")
+        t["ts"] = time.time()
+        with self.assertRaises(execution.risk.Reject) as cm:
+            execution._gates_buy(t, 1000.0, True)
+        self.assertEqual(cm.exception.rule, "wrong_quote_currency")
+
+    def test_a_buy_in_the_currency_we_hold_passes(self):
+        self.patch(coinbase, "balances", lambda: {"USDC": 275.0})
+        self.patch(execution.marketdata, "price", lambda a: 1.0)
+        self.patch(execution.risk, "check_buy", lambda *a, **k: None)
+        state.set_mode("NORMAL", reason="test")
+        t = ticket("cex:BTC-USDC", "coinbase")
+        t["ts"] = time.time()
+        self.assertEqual(execution._gates_buy(t, 1000.0, True), 1.0)
+
+    def test_usdc_balance_still_totals_spendable_cash(self):
+        self.patch(coinbase, "balances", lambda: {"USDC": 200.0, "USD": 75.0, "BTC": 3.0})
+        self.assertAlmostEqual(coinbase.usdc_balance(), 275.0)
+
+
 class VenuePrecision(Base):
     """The first real Coinbase order was rejected with INVALID_PRICE_PRECISION:
     a limit price formatted with %.8g gave BTC-USD three decimals against a
@@ -291,12 +325,14 @@ class ApprovedBuyGates(Base):
         state.set_mode("NORMAL", reason="test")
         self.patch(execution.marketdata, "price", lambda a: 1.0)
         self.patch(execution.risk, "check_buy", lambda *a, **k: None)
+        self.patch(coinbase, "balances", lambda: {"USD": 1000.0})
         t = ticket("cex:GGG-USD", "coinbase")
         t["ts"] = time.time()
         self.assertEqual(execution.execute_approved(t, 1000.0, True), "filled")
         self.assertEqual(self.calls, ["cex:GGG-USD"])
 
     def test_halt_blocks_an_approved_buy(self):
+        self.patch(coinbase, "balances", lambda: {"USD": 1000.0})
         state.set_mode("USER_STOP", reason="test")
         r = execution.execute_approved(ticket("cex:DDD-USD", "coinbase"), 1000.0, True)
         self.assertEqual(r, "blocked")

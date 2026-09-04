@@ -18,6 +18,9 @@ HEALTHCHECK_URL = env("HEALTHCHECK_URL")
 COINBASE_API_KEY = env("COINBASE_API_KEY")           # CDP key name
 COINBASE_API_SECRET = env("COINBASE_API_SECRET")     # CDP private key (Ed25519)
 COINBASE_PORTFOLIO = env("COINBASE_PORTFOLIO", "HypeBot")
+# The quote currency the portfolio actually holds. Products quoted in anything
+# else are unbuyable however good they look -- see coinbase.quote_balance.
+COINBASE_QUOTE = env("COINBASE_QUOTE", "USDC")
 ANTHROPIC_MODEL = env("ANTHROPIC_MODEL", "claude-opus-5")
 # Identity-linked (Personal) API keys must name the workspace they act in.
 # Leave unset for a Workspace-type key.

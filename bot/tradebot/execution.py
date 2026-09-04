@@ -25,6 +25,16 @@ def _gates_buy(ticket, total_value, marks_fresh):
     notional = ticket["notional_usd"]
     risk.check_buy(ticket["asset_id"], ticket["venue"], ticket.get("chain"),
                    notional, ref, ref, total_value, marks_fresh)
+    # gate 3b: can we actually pay in this product's quote currency?
+    if ticket["venue"] == "coinbase":
+        quote = asset_quote_currency(ticket["asset_id"])
+        try:
+            avail = coinbase.quote_balance(quote)
+        except Exception as e:
+            raise risk.Reject("quote_balance_unknown", f"{quote}: {e}")
+        if avail < notional:
+            raise risk.Reject("wrong_quote_currency",
+                              f"{quote} available {avail:.2f} < {notional:.2f}")
     # gate 4: exit-safety for tokens
     chain = ticket.get("chain")
     if chain in ("solana", "base"):
@@ -106,6 +116,12 @@ def clamp_fraction(frac):
     if f != f or f <= 0:      # NaN or non-positive
         return 1.0
     return min(f, 1.0)
+
+
+def asset_quote_currency(asset_id):
+    """cex:BTC-USDC -> USDC. What the order will actually be charged in."""
+    product = asset_id.split(":", 1)[1]
+    return product.rsplit("-", 1)[-1] if "-" in product else config.COINBASE_QUOTE
 
 
 def _entry_liquidity(asset_id, chain):

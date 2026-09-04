@@ -22,13 +22,35 @@ def _to_dict(resp):
     return resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
 
 
-def usdc_balance():
+QUOTE_CURRENCIES = ("USDC", "USD")
+
+
+def balances():
+    """Available balance per currency."""
     accts = _to_dict(client().get_accounts(limit=250))
-    total = 0.0
+    out = {}
     for a in accts.get("accounts", []):
-        if a.get("currency") in ("USDC", "USD"):
-            total += float((a.get("available_balance") or {}).get("value") or 0)
-    return total
+        cur = a.get("currency")
+        if cur:
+            out[cur] = out.get(cur, 0.0) + float(
+                (a.get("available_balance") or {}).get("value") or 0)
+    return out
+
+
+def quote_balance(currency):
+    """Spendable balance in ONE quote currency.
+
+    USD and USDC are not interchangeable on a given product: a BTC-USD order
+    cannot spend USDC, and the venue refuses it with INSUFFICIENT_FUND. The
+    first real order died this way -- the books said $275 cash and every dollar
+    of it was USDC while the order was quoted in USD."""
+    return balances().get(currency, 0.0)
+
+
+def usdc_balance():
+    """Total spendable quote cash, for the portfolio-value denominator."""
+    b = balances()
+    return sum(b.get(c, 0.0) for c in QUOTE_CURRENCIES)
 
 
 _products = {}

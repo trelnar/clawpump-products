@@ -179,12 +179,16 @@ def dexscreener_trending():
 
 
 def coinbase_movers():
-    """24h stats across USD/USDC products; returns big movers (keyless)."""
+    """24h stats across products we can actually pay for; big movers (keyless).
+
+    Only the quote currency the portfolio holds: a mover quoted in USD is not a
+    candidate when every dollar of the balance is USDC."""
     out = []
     try:
         prods = _get("https://api.exchange.coinbase.com/products")
         usd = [p["id"] for p in prods
-               if p.get("quote_currency") in ("USD", "USDC") and not p.get("trading_disabled")]
+               if p.get("quote_currency") == config.COINBASE_QUOTE
+               and not p.get("trading_disabled")]
         # stats endpoint is per-product; sample a bounded set to respect limits
         for pid in usd[:80]:
             try:
