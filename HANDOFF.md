@@ -162,9 +162,14 @@ number, not a percentage anyone picked, is the argument for more capital or fewe
 **One-time, as root** — separates the research layer's credentials from the trading ones:
 ```
 bash /opt/tradebot/scripts/split-credentials.sh
-systemctl daemon-reload && systemctl restart tradebot-agent
-sudo -u agent cat /etc/tradebot/secrets.env   # must say Permission denied
+systemctl daemon-reload && systemctl restart tradebot-core tradebot-agent
 ```
+The script self-verifies and prints an `ok`/`FAIL` line per file. **Never `cat` the
+secrets file to check a permission** — a readability test proves the same thing without
+putting credentials on screen where they can be screenshotted. The first version of this
+script did not actually work: it put `agent` in group `bot` for database access while
+`secrets.env` was root:bot 640, so the excluded user could read it the whole time. The
+database and the secrets now use different groups (`tbdata` and `bot`).
 The agent service now runs as its own `agent` user against `/etc/tradebot/agent.env`.
 Until this is run, `tradebot-agent` will fail to start (its unit points at a file that
 does not exist yet) — that ordering is deliberate: fail loudly rather than quietly keep

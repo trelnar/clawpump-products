@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=agent
-Group=bot
+Group=agent
+SupplementaryGroups=tbdata
 # The research layer ingests untrusted scraped content and talks to an external
 # API -- the largest attack surface here -- and needs none of the trading
 # credentials: it only writes tickets to SQLite, and every ticket still passes
