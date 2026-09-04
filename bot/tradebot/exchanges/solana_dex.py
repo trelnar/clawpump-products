@@ -8,8 +8,36 @@ import requests
 from .. import config, journal
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-JUP = "https://quote-api.jup.ag/v6"
 LAMPORTS = 1_000_000_000
+
+_jup_base = None
+
+
+def jupiter(path, method="GET", **kw):
+    """Call Jupiter, resolving which base URL currently works.
+
+    The hardcoded quote-api.jup.ag stopped resolving and took every Solana swap
+    with it -- a DNS failure, not an API error, so nothing in the code could
+    have adapted. Bases are tried in order and the winner is remembered for the
+    life of the process; a base that later dies simply falls through to the
+    next one on the following call."""
+    global _jup_base
+    order = ([_jup_base] if _jup_base else []) + \
+            [b for b in config.JUPITER_BASES if b != _jup_base]
+    last = None
+    for base in order:
+        try:
+            fn = requests.post if method == "POST" else requests.get
+            r = fn(f"{base}{path}", timeout=kw.pop("timeout", 20), **kw)
+            r.raise_for_status()
+            if base != _jup_base:
+                journal.log_event("jupiter_base", detail=base)
+                _jup_base = base
+            return r.json()
+        except Exception as e:
+            last = e
+            kw.setdefault("timeout", 20)
+    raise RuntimeError(f"Jupiter unreachable on {order}: {last}")
 
 
 def _keypair():
@@ -93,11 +121,9 @@ def token_decimals(mint):
 
 
 def quote(input_mint, output_mint, amount_raw, slippage_bps):
-    r = requests.get(f"{JUP}/quote", params={
+    return jupiter("/quote", params={
         "inputMint": input_mint, "outputMint": output_mint, "amount": str(amount_raw),
-        "slippageBps": slippage_bps, "restrictIntermediateTokens": "true"}, timeout=15)
-    r.raise_for_status()
-    return r.json()
+        "slippageBps": slippage_bps, "restrictIntermediateTokens": "true"})
 
 
 def exit_safety(mint, notional_usd, max_tax=None):
@@ -145,12 +171,10 @@ def swap(input_mint, output_mint, amount_raw, slippage_bps):
     from solders.transaction import VersionedTransaction
     kp = _keypair()
     q = quote(input_mint, output_mint, amount_raw, slippage_bps)
-    r = requests.post(f"{JUP}/swap", json={
+    tx_b64 = jupiter("/swap", method="POST", json={
         "quoteResponse": q, "userPublicKey": str(kp.pubkey()),
         "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": "auto"}, timeout=20)
-    r.raise_for_status()
-    tx_b64 = r.json()["swapTransaction"]
+        "prioritizationFeeLamports": "auto"})["swapTransaction"]
     tx = VersionedTransaction.from_bytes(base64.b64decode(tx_b64))
     signed = VersionedTransaction(tx.message, [kp])
     raw_b64 = base64.b64encode(bytes(signed)).decode()

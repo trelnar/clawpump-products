@@ -34,6 +34,13 @@ AGENT_CANDLE_SHORTLIST = int(env("AGENT_CANDLE_SHORTLIST", "2"))  # candles fetc
 SOLANA_KEYFILE = env("SOLANA_KEYFILE", "/etc/tradebot/solana_wallet.json")
 EVM_KEYFILE = env("EVM_KEYFILE", "/etc/tradebot/evm_wallet.key")
 SOLANA_RPC = env("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
+# Jupiter has retired an endpoint under us before: quote-api.jup.ag stopped
+# resolving and every Solana swap died at DNS. Tried in order; the first that
+# answers is remembered for the process.
+JUPITER_BASES = [b.strip() for b in env(
+    "JUPITER_BASES",
+    "https://lite-api.jup.ag/swap/v1,https://api.jup.ag/swap/v1,"
+    "https://quote-api.jup.ag/v6").split(",") if b.strip()]
 BASE_RPC = env("BASE_RPC", "https://mainnet.base.org")
 
 LOG_STDOUT = env("TRADEBOT_LOG_STDOUT", "1") not in ("0", "false", "")
