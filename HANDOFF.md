@@ -46,10 +46,18 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).
-- **First round trip executed 2026-09-04 23:34** — $5 of BTC-USDC bought and sold on
-Coinbase through the bot's own code path. Cash returned to $275.35 exactly. `execute_sell`
-has now sold something, which no amount of review could establish. Solana and Base
-round trips still outstanding.
+- **All three venues proven with real money, 2026-09-04/05.** $5 round trips through the
+bot's own code path: Coinbase (BTC-USDC), Solana (USDT via Jupiter), Base (WETH via
+KyberSwap). Cash after: coinbase $275.34, solana $385.00, base $215.00 — within cents of
+where it started, plus ~0.049 SOL that a wSOL test converted into gas float. The Base sell
+was executed by the bot autonomously: the agent saw an adopted WETH position, returned
+`SELL_NOW`, and the core exited it. Every safety mechanism now terminates in a function
+that has demonstrably sold on every chain.
+
+The round trips found nine defects that would each have hit the first real trade — price
+precision, quote currency, a retired Jupiter host, wSOL unwrapping, the pair-side mark bug,
+stale quotes, stale blockhashes, preflight commitment, an unverified approve — plus the
+public RPCs' rate limits. All fixed; dedicated Alchemy endpoints now in `secrets.env`.
 
 Credentials live in `/etc/tradebot/secrets.env` (Telegram token, healthchecks URL, Coinbase
 CDP key + secret, Anthropic key). Wallet keys in `/etc/tradebot/`. **No backups of any of it.**
