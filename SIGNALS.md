@@ -29,7 +29,7 @@ and `$TICKER`s are extracted and stored.
 | `gecko` | GeckoTerminal trending + new pools on Solana and Base | nothing | on |
 | `pumpfun` | pump.fun launches, king-of-the-hill, **graduations** (the canonical Solana memecoin event) | nothing | on |
 | `clanker` | new token deploys on Base via Clanker | nothing | on |
-| `reddit` | new posts in `REDDIT_SUBS` (CryptoMoonShots, solana, memecoins, SolanaMemeCoins, base), upvote-weighted | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` (free; Reddit 403s datacenter IPs without them) | on, fails until keyed |
+| `reddit` | new posts in `REDDIT_SUBS` (CryptoMoonShots, solana, memecoins, SolanaMemeCoins, base), upvote-weighted | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` (new Data API apps now need an approved request ticket with a moderation use case) | off until keyed |
 | `farcaster` | cast search for addresses/tickers, via Neynar | `NEYNAR_API_KEY` (free tier) | off until keyed |
 | `birdeye` | holder-count growth on the top 5 rising Solana assets | `BIRDEYE_API_KEY` (free tier) | off until keyed |
 | `telegram` | new messages in `TG_CHANNELS`, as `call` events — separate daemon | `TG_API_ID`, `TG_API_HASH`, `TG_CHANNELS`, one-time login | off until set |

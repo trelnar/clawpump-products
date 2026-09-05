@@ -40,7 +40,10 @@ def _bearer():
 
 
 def enabled():
-    return "reddit" in config.SIGNAL_SOURCES
+    # Without app credentials every read from the VPS is a 403; five failure
+    # rows per cycle for a known cause is noise, not monitoring.
+    return ("reddit" in config.SIGNAL_SOURCES
+            and bool(config.REDDIT_CLIENT_ID and config.REDDIT_CLIENT_SECRET))
 
 
 def _get(sub):
