@@ -60,6 +60,10 @@ class SanityQty(Base):
 
 
 class SolanaBuy(Base):
+    def setUp(self):
+        super().setUp()
+        self.patch(config, "SETTLE_READ_SLEEP_SEC", 0)
+
     def _stub(self, before, after, decimals, confirm="finalized"):
         self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
         self.patch(solana_dex, "token_decimals", lambda m: decimals)
@@ -123,12 +127,30 @@ class SolanaBuy(Base):
         self.assertAlmostEqual(state.get_position("solana:RPCX")["qty"], 5000.0)
         self.assertEqual(state.get_mode(), "RECON_FREEZE")
 
-    def test_unconfirmed_swap_books_nothing(self):
-        self._stub(0, 5_000_000_000, 6, confirm="unknown")
+    def test_unconfirmed_swap_with_no_tokens_books_nothing(self):
+        self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
+        self.patch(solana_dex, "token_decimals", lambda m: 6)
+        self.patch(solana_dex, "token_balance", lambda m: (0, 6))   # never arrives
+        self.patch(solana_dex, "swap", lambda *a, **k: ("sigN", {"outAmount": "5000000000"}))
+        self.patch(solana_dex, "confirm", lambda s: "unknown")
         self.patch(config, "FILL_TIMEOUT_SOL_SEC", 0)
         r = execution.execute_buy(ticket("solana:MINT2", "solana", "solana"), 0.001)
         self.assertEqual(r, "failed")
         self.assertIsNone(state.get_position("solana:MINT2"))
+
+    def test_unconfirmed_signature_with_tokens_in_the_wallet_IS_a_fill(self):
+        # The wallet is the fact; the status endpoint is a convenience.
+        self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
+        self.patch(solana_dex, "token_decimals", lambda m: 6)
+        reads = iter([(0, 6)] + [(5_000_000_000, 6)] * 10)
+        self.patch(solana_dex, "token_balance", lambda m: next(reads))
+        self.patch(solana_dex, "swap", lambda *a, **k: ("sigL", {"outAmount": "5000000000"}))
+        self.patch(solana_dex, "confirm", lambda s: "unknown")
+        self.patch(config, "FILL_TIMEOUT_SOL_SEC", 0)
+        self.patch(execution.marketdata, "price", lambda a: 0.001)
+        r = execution.execute_buy(ticket("solana:MINT6", "solana", "solana"), 0.001)
+        self.assertEqual(r, "filled")
+        self.assertAlmostEqual(state.get_position("solana:MINT6")["qty"], 5000.0)
 
 
 class BaseChainBuy(Base):
