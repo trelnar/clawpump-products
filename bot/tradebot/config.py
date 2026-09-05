@@ -33,7 +33,15 @@ AGENT_MAX_CANDIDATES = int(env("AGENT_MAX_CANDIDATES", "15"))  # payload cap per
 AGENT_CANDLE_SHORTLIST = int(env("AGENT_CANDLE_SHORTLIST", "2"))  # candles fetched per cycle
 SOLANA_KEYFILE = env("SOLANA_KEYFILE", "/etc/tradebot/solana_wallet.json")
 EVM_KEYFILE = env("EVM_KEYFILE", "/etc/tradebot/evm_wallet.key")
-SOLANA_RPC = env("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
+# RPC endpoints. The public ones rate-limit (mainnet.base.org 429'd a single
+# swap's burst of calls) and lag; a free key from Alchemy/Helius/QuickNode in
+# secrets.env is the real fix, and the fallbacks keep things moving until then.
+# Comma-separated; tried in order; rotated on 429 or connection failure.
+SOLANA_RPCS = [u.strip() for u in env(
+    "SOLANA_RPC",
+    "https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com"
+).split(",") if u.strip()]
+SOLANA_RPC = SOLANA_RPCS[0]
 # Jupiter has retired an endpoint under us before: quote-api.jup.ag stopped
 # resolving and every Solana swap died at DNS. Tried in order; the first that
 # answers is remembered for the process.
@@ -41,7 +49,12 @@ JUPITER_BASES = [b.strip() for b in env(
     "JUPITER_BASES",
     "https://lite-api.jup.ag/swap/v1,https://api.jup.ag/swap/v1,"
     "https://quote-api.jup.ag/v6").split(",") if b.strip()]
-BASE_RPC = env("BASE_RPC", "https://mainnet.base.org")
+BASE_RPCS = [u.strip() for u in env(
+    "BASE_RPC",
+    "https://mainnet.base.org,https://base-rpc.publicnode.com,"
+    "https://base.llamarpc.com,https://1rpc.io/base"
+).split(",") if u.strip()]
+BASE_RPC = BASE_RPCS[0]
 
 LOG_STDOUT = env("TRADEBOT_LOG_STDOUT", "1") not in ("0", "false", "")
 

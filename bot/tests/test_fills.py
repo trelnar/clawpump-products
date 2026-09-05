@@ -541,6 +541,58 @@ class GasFloor(Base):
         self.assertEqual(cm.exception.rule, "gas_unknown")
 
 
+class RpcFallback(Base):
+    """The public RPCs throttle. A 429 rotates to the next endpoint; an
+    ambiguous broadcast never retries."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(config, "BASE_RPCS", ["https://a", "https://b", "https://c"])
+        evm_dex._rpc_idx = 0
+
+    def test_a_throttled_read_rotates_and_succeeds(self):
+        calls = []
+
+        @evm_dex._with_fallback
+        def read():
+            calls.append(evm_dex._rpc_idx)
+            if len(calls) < 3:
+                raise RuntimeError("429 Client Error: Too Many Requests")
+            return "ok"
+        self.assertEqual(read(), "ok")
+        self.assertEqual(calls, [0, 1, 2])
+
+    def test_a_real_error_is_not_retried(self):
+        calls = []
+
+        @evm_dex._with_fallback
+        def read():
+            calls.append(1)
+            raise RuntimeError("execution reverted: TransferHelper: TRANSFER_FROM_FAILED")
+        with self.assertRaises(RuntimeError):
+            read()
+        self.assertEqual(len(calls), 1)
+
+    def test_an_ambiguous_send_is_never_retried(self):
+        calls = []
+
+        @evm_dex._with_fallback
+        def send():
+            calls.append(1)
+            raise evm_dex.SendAmbiguous("send timed out")
+        with self.assertRaises(evm_dex.SendAmbiguous):
+            send()
+        self.assertEqual(len(calls), 1)
+
+    def test_every_endpoint_dead_raises_once_exhausted(self):
+        @evm_dex._with_fallback
+        def read():
+            raise RuntimeError("429")
+        with self.assertRaises(RuntimeError) as cm:
+            read()
+        self.assertIn("all Base RPCs failed", str(cm.exception))
+
+
 class PairSide(Base):
     """priceUsd is the BASE token's price. USDT under a SOL/USDT pool was
     marked at $0.067 -- a different asset's number, feeding the stop."""

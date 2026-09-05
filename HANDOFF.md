@@ -188,6 +188,12 @@ bash /opt/tradebot/scripts/spend.sh
 sqlite3 /var/lib/tradebot/tradebot.db "SELECT datetime(ts,'unixepoch'), kind, substr(detail,1,120) FROM events ORDER BY ts DESC LIMIT 20;"
 ```
 
+**RPC endpoints**: the defaults are public and rate-limit under a single swap's burst of
+calls (mainnet.base.org 429'd; mainnet-beta.solana.com lags). Both are now comma-separated
+fallback lists that rotate on 429, but the real fix is a free dedicated key — Alchemy or
+QuickNode for Base, Helius for Solana — put first in `BASE_RPC` / `SOLANA_RPC` in
+`secrets.env`. Do this before phase 2.
+
 **Tests**: `cd bot && python3 -m unittest discover -s tests` — no network, no credentials,
 runs anywhere. 78 tests; 8 skip where the Coinbase SDK is absent, so run it on the VPS too.
 `test_contracts.py` checks the code against the *installed SDK* rather than against mocks —

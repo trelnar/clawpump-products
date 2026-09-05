@@ -1,5 +1,7 @@
 """execution venue: Base (EVM) via the KyberSwap aggregator (keyless API).
 Same exit-safety contract as Solana. One EVM key serves every EVM chain."""
+import functools
+
 import requests
 
 from .. import config, journal
@@ -21,11 +23,56 @@ def address():
     return _account().address
 
 
+_rpc_idx = 0
+
+
 def _w3():
     from web3 import Web3
-    return Web3(Web3.HTTPProvider(config.BASE_RPC))
+    url = config.BASE_RPCS[_rpc_idx % len(config.BASE_RPCS)]
+    return Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 20}))
 
 
+def _throttled(e):
+    txt = repr(e)
+    return ("429" in txt or "Too Many" in txt or "ConnectionError" in txt
+            or "timed out" in txt or "503" in txt or "502" in txt)
+
+
+def _rotate(e):
+    global _rpc_idx
+    old = config.BASE_RPCS[_rpc_idx % len(config.BASE_RPCS)]
+    _rpc_idx += 1
+    journal.log_event("base_rpc_rotate", detail=(
+        f"{old}: {str(e)[:80]} -> {config.BASE_RPCS[_rpc_idx % len(config.BASE_RPCS)]}"))
+
+
+class SendAmbiguous(RuntimeError):
+    """The broadcast call failed in a way that does not say whether the node
+    took the transaction. Never retried: a second send could double-swap."""
+
+
+def _with_fallback(fn):
+    """Retry a call on the next RPC when the current one throttles or dies.
+    The public Base endpoint 429'd a single swap's burst of calls. Reads are
+    idempotent; swap() guards its own broadcast (see SendAmbiguous)."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        last = None
+        for _ in range(len(config.BASE_RPCS)):
+            try:
+                return fn(*a, **k)
+            except SendAmbiguous:
+                raise
+            except Exception as e:
+                if not _throttled(e):
+                    raise
+                _rotate(e)
+                last = e
+        raise RuntimeError(f"all Base RPCs failed: {last}")
+    return wrapper
+
+
+@_with_fallback
 def eth_balance():
     w3 = _w3()
     return w3.eth.get_balance(address()) / 1e18
@@ -45,6 +92,7 @@ ERC20_ABI = [
 ]
 
 
+@_with_fallback
 def allowance(token, owner, spender):
     w3 = _w3()
     c = w3.eth.contract(address=w3.to_checksum_address(token), abi=ERC20_ABI)
@@ -52,6 +100,7 @@ def allowance(token, owner, spender):
                                  w3.to_checksum_address(spender)).call()
 
 
+@_with_fallback
 def token_balance(token):
     w3 = _w3()
     c = w3.eth.contract(address=w3.to_checksum_address(token), abi=ERC20_ABI)
@@ -130,8 +179,14 @@ def _ensure_allowance(w3, acct, token, spender, amount, nonce):
     raise RuntimeError(f"approve mined ({h}) but allowance still below {amount}")
 
 
+@_with_fallback
 def swap(token_in, token_out, amount_raw, slippage_bps):
-    """Build via Kyber, approve if needed, sign locally, send, return tx hash."""
+    """Build via Kyber, approve if needed, sign locally, send, return tx hash.
+
+    Safe to retry on a throttled RPC up to the broadcast: the approve is
+    idempotent (the allowance persists and is re-read), and a 429 on the send
+    itself means the node rejected the request before looking at it. A
+    timeout on the send is the one ambiguous case and is never retried."""
     w3 = _w3()
     acct = _account()
     rt = route(token_in, token_out, amount_raw)
@@ -161,7 +216,12 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
     if config.SIMULATE_BEFORE_SEND:
         w3.eth.call(tx)   # reverts here rather than costing gas on-chain
     signed = acct.sign_transaction(tx)
-    h = w3.to_hex(w3.eth.send_raw_transaction(signed.raw_transaction))
+    try:
+        h = w3.to_hex(w3.eth.send_raw_transaction(signed.raw_transaction))
+    except Exception as e:
+        if "timed out" in repr(e) or "timeout" in repr(e).lower():
+            raise SendAmbiguous(f"send timed out; state unknown: {e}")
+        raise
     journal.log_order(client_oid=h, venue="base",
                       asset_id=f"base:{token_out if token_in == USDC else token_in}",
                       side="buy" if token_in == USDC else "sell",
@@ -169,10 +229,16 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
     return h
 
 
+@_with_fallback
 def confirm(tx_hash):
+    """'unknown' means still pending. A throttled RPC is NOT 'unknown' -- it
+    must propagate so the fallback rotates, else a landed swap polls a dead
+    endpoint for three minutes and books as a timeout."""
     w3 = _w3()
     try:
         rec = w3.eth.get_transaction_receipt(tx_hash)
         return "confirmed" if rec and rec["status"] == 1 else "failed"
-    except Exception:
+    except Exception as e:
+        if _throttled(e):
+            raise
         return "unknown"

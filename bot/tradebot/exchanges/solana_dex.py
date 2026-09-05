@@ -50,14 +50,42 @@ def address():
     return str(_keypair().pubkey())
 
 
+_rpc_idx = 0
+
+
+def _throttled(e):
+    txt = repr(e)
+    return "429" in txt or "Too Many" in txt or "ConnectionError" in txt or "timed out" in txt
+
+
 def _rpc(method, params):
-    r = requests.post(config.SOLANA_RPC, json={"jsonrpc": "2.0", "id": 1,
-                                               "method": method, "params": params}, timeout=15)
-    r.raise_for_status()
-    j = r.json()
-    if "error" in j:
-        raise RuntimeError(f"rpc {method}: {j['error']}")
-    return j["result"]
+    """JSON-RPC with endpoint rotation. A 429 or a dead endpoint moves to the
+    next configured URL and retries once there; an RPC-level error (a failed
+    simulation, a bad blockhash) is returned to the caller unchanged, because
+    that is information, not a transport problem."""
+    global _rpc_idx
+    urls = config.SOLANA_RPCS
+    last = None
+    for _ in range(len(urls)):
+        url = urls[_rpc_idx % len(urls)]
+        try:
+            r = requests.post(url, json={"jsonrpc": "2.0", "id": 1,
+                                         "method": method, "params": params}, timeout=15)
+            r.raise_for_status()
+            j = r.json()
+            if "error" in j:
+                raise RuntimeError(f"rpc {method}: {j['error']}")
+            return j["result"]
+        except RuntimeError:
+            raise
+        except Exception as e:
+            if not _throttled(e):
+                raise
+            last = e
+            _rpc_idx += 1
+            journal.log_event("solana_rpc_rotate",
+                              detail=f"{url}: {str(e)[:80]} -> {urls[_rpc_idx % len(urls)]}")
+    raise RuntimeError(f"all Solana RPCs failed: {last}")
 
 
 def sol_balance():
