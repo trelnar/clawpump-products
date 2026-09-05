@@ -191,37 +191,60 @@ class SimulationFailed(RuntimeError):
         return "Slippage" in self.reason
 
 
-def swap(input_mint, output_mint, amount_raw, slippage_bps):
-    """Quote -> signed VersionedTransaction -> simulate -> send.
-
-    A quote is a snapshot of pool state and goes stale within seconds; the
-    simulation is what catches that, and it did on the first Solana round trip
-    (SlippageToleranceExceeded). One fresh quote and retry is the right
-    response to a stale quote. A second failure is real, and nothing is sent."""
+def _build_signed(kp, input_mint, output_mint, amount_raw, slippage_bps):
+    """Quote -> Jupiter-built transaction -> signed. Returns (quote, tx_b64)."""
+    q = quote(input_mint, output_mint, amount_raw, slippage_bps)
+    tx_b64 = jupiter("/swap", method="POST", json={
+        "quoteResponse": q, "userPublicKey": str(kp.pubkey()),
+        "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
+        "prioritizationFeeLamports": "auto"})["swapTransaction"]
     from solders.transaction import VersionedTransaction
+    tx = VersionedTransaction.from_bytes(base64.b64decode(tx_b64))
+    signed = VersionedTransaction(tx.message, [kp])
+    return q, base64.b64encode(bytes(signed)).decode()
+
+
+def swap(input_mint, output_mint, amount_raw, slippage_bps):
+    """Quote -> build -> sign -> simulate -> send, rebuilding once when the
+    market or the chain moved underneath us.
+
+    Two things go stale on their own clock here. A quote is a snapshot of pool
+    state and can be off within seconds (the simulation reports Jupiter 6001,
+    SlippageToleranceExceeded). A built transaction carries a recent blockhash
+    that the chain stops accepting roughly a minute later (sendTransaction
+    reports BlockhashNotFound). Both round trips hit one of these. The right
+    response to either is one fresh build; a second failure is real and
+    nothing is broadcast. Phase timings are logged so the next slow leg is
+    visible rather than inferred."""
+    import time as _t
     kp = _keypair()
-    last = None
     for attempt in range(2):
-        q = quote(input_mint, output_mint, amount_raw, slippage_bps)
-        tx_b64 = jupiter("/swap", method="POST", json={
-            "quoteResponse": q, "userPublicKey": str(kp.pubkey()),
-            "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
-            "prioritizationFeeLamports": "auto"})["swapTransaction"]
-        tx = VersionedTransaction.from_bytes(base64.b64decode(tx_b64))
-        signed = VersionedTransaction(tx.message, [kp])
-        raw_b64 = base64.b64encode(bytes(signed)).decode()
-        if not config.SIMULATE_BEFORE_SEND:
-            break
-        try:
-            simulate(raw_b64)   # raises, and nothing is broadcast
-            break
-        except SimulationFailed as e:
-            last = e
-            if not e.stale_quote or attempt == 1:
+        t0 = _t.time()
+        q, raw_b64 = _build_signed(kp, input_mint, output_mint, amount_raw, slippage_bps)
+        t_built = _t.time()
+        if config.SIMULATE_BEFORE_SEND:
+            try:
+                simulate(raw_b64)
+            except SimulationFailed as e:
+                if e.stale_quote and attempt == 0:
+                    journal.log_event("swap_rebuild", detail=f"{e.reason}; rebuilding once")
+                    continue
                 raise
-            journal.log_event("swap_requote", detail=f"{e.reason}; re-quoting once")
-    sig = _rpc("sendTransaction",
-               [raw_b64, {"encoding": "base64", "skipPreflight": False}])
+        t_sim = _t.time()
+        try:
+            sig = _rpc("sendTransaction",
+                       [raw_b64, {"encoding": "base64", "skipPreflight": False}])
+        except RuntimeError as e:
+            if "BlockhashNotFound" in str(e) and attempt == 0:
+                journal.log_event("swap_rebuild", detail=(
+                    f"BlockhashNotFound after build {t_built - t0:.1f}s + "
+                    f"sim {t_sim - t_built:.1f}s; rebuilding once"))
+                continue
+            raise
+        journal.log_event("swap_timing", detail={
+            "build_s": round(t_built - t0, 1), "sim_s": round(t_sim - t_built, 1),
+            "send_s": round(_t.time() - t_sim, 1), "attempt": attempt + 1})
+        break
     journal.log_order(client_oid=sig, venue="solana",
                       asset_id=f"solana:{output_mint if input_mint == USDC_MINT else input_mint}",
                       side="buy" if input_mint == USDC_MINT else "sell",
