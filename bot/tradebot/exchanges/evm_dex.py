@@ -241,4 +241,8 @@ def confirm(tx_hash):
     except Exception as e:
         if _throttled(e):
             raise
+        # Name the reason. A swap that landed once polled as "unknown" for the
+        # full three minutes and was booked as a timeout with the tokens
+        # orphaned -- and the log said nothing about why.
+        journal.log_event("evm_confirm_unknown", detail=f"{type(e).__name__}: {str(e)[:120]}")
         return "unknown"
