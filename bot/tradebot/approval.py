@@ -6,7 +6,8 @@ import time
 from . import alerts, config, journal, state
 
 HELP = ("Unrecognized. Commands: YES <code>, NO <code>, REVOKE <asset>, STOP, "
-        "FLATTEN, RESUME, STATUS, REPORT, SCORE [days], WHY <asset>")
+        "FLATTEN, RESUME, STATUS, REPORT, SCORE [days], GAPS, SIGNALS [asset], "
+        "WHY <asset>")
 
 
 def new_code():
