@@ -131,7 +131,7 @@ are systematically optimistic for exactly the tokens this bot hunts.
 | **Security** | Both wallets blind-sign transactions built by third-party aggregators (no router allowlist, no simulation). The research service is handed every credential. Telegram token gets written into the journal on transport errors. |
 | **Unimplemented skills** | `backtest-replay`, calibration, `capital-allocation`, `equities-constraints` are prose only. Every decision-logic change goes straight to live money. |
 | ~~**Strategy inputs**~~ | *Fixed 2026-09-05.* Discovery was two *paid-promotion* endpoints plus an alphabetical slice of Coinbase products. It is now the signal layer (`SIGNALS.md`): launches, graduations, new pools, Reddit, Farcaster, holder growth, Telegram calls — ranked by acceleration × breadth. Paid promotion is off by default. **Unverified live**: the sandbox could not reach any source, so parsers are fixture-tested only — run `scripts/signals_probe.py` after deploying. Still open: only 3 of 18 skills reach the model. |
-| **Correctness traps** | `REVOKE` can never match a token asset (and reports success). Approval codes use a hex alphabet the spec excludes. Rejected assets re-propose within 15 minutes. A DexScreener response missing `priceUsd` yields 0.0, which reads as an invalidation cross and liquidates the position. |
+| ~~**Correctness traps**~~ | *Fixed.* `REVOKE` now matches token assets. A NO holds for `REJECT_COOLDOWN_SEC` (24h): the asset is blocked at gate 5 without re-asking, and discovery skips it. A DexScreener price of 0 is now a blind read (`None`), not an invalidation cross. Still open: approval codes use a hex alphabet the spec excludes (cosmetic). |
 
 ### 3d. Areas to explore (beyond fixing)
 

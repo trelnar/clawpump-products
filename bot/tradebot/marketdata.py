@@ -95,8 +95,12 @@ def price(asset_id):
         else:
             info = dexscreener_token(kind, ident)
             p = info["price"] if info else None
-        if p:
-            _price_cache[asset_id] = (p, time.time())
+        # A missing priceUsd used to come back as 0.0, which the monitor read
+        # as a real price below every invalidation level and sold into. Zero is
+        # not a price; it is a blind read, and blind is what None means here.
+        if not p or p <= 0:
+            return None
+        _price_cache[asset_id] = (p, time.time())
         return p
     except Exception as e:
         journal.log_event("price_fetch_fail", asset_id, str(e))

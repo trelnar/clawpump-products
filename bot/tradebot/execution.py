@@ -87,6 +87,14 @@ def process_ticket(ticket, total_value, marks_fresh):
     # gate 5: whitelist or approval
     if state.is_whitelisted(ticket["asset_id"]):
         return execute_buy(ticket, ref)
+    # A NO is an answer, not a request to ask again in 15 minutes. The same
+    # asset used to come straight back on the next research cycle.
+    age = state.rejected_recently(ticket["asset_id"])
+    if age is not None:
+        state.set_ticket_status(ticket["ticket_id"], "blocked:rejected_cooldown")
+        journal.log_event("ticket_rejected_cooldown", ticket["asset_id"],
+                          {"rejected_min_ago": int(age / 60)})
+        return "blocked"
     approval.request_buy_approval(ticket, ref, {
         "Size": f"${ticket['notional_usd']:.2f}",
         "Zone": f"{ticket.get('buy_zone_lo')}-{ticket.get('buy_zone_hi')}",

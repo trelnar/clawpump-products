@@ -44,6 +44,9 @@ def gather():
         asset = f"{chain}:{address}"
         if asset in seen or len(enriched) >= config.AGENT_MAX_CANDIDATES:
             return
+        if state.rejected_recently(asset) is not None:
+            seen.add(asset)      # the NO stands; no research spend on it
+            return
         info = marketdata.dexscreener_token(chain, address)
         if not info or info["liquidity_usd"] < config.SIGNAL_MIN_LIQUIDITY_USD:
             return

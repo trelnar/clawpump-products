@@ -328,6 +328,18 @@ def resolve_pending(code, status):
         journal.conn().commit()
 
 
+def rejected_recently(asset_id):
+    """Seconds since the last explicit NO on this asset, or None. Used to
+    stop the same idea coming back for approval every research cycle."""
+    r = journal.query(
+        "SELECT MAX(ts) AS ts FROM pending_approvals WHERE asset_id=? AND status='rejected'",
+        (asset_id,))
+    if not r or r[0]["ts"] is None:
+        return None
+    age = time.time() - r[0]["ts"]
+    return age if age < config.REJECT_COOLDOWN_SEC else None
+
+
 def expire_pendings():
     expired = journal.query(
         "SELECT * FROM pending_approvals WHERE status='pending' AND expires < ?", (time.time(),))
