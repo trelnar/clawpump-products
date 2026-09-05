@@ -34,12 +34,22 @@ def eth_balance():
 ERC20_ABI = [
     {"name": "balanceOf", "type": "function", "stateMutability": "view",
      "inputs": [{"name": "a", "type": "address"}], "outputs": [{"name": "", "type": "uint256"}]},
+    {"name": "allowance", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "o", "type": "address"}, {"name": "s", "type": "address"}],
+     "outputs": [{"name": "", "type": "uint256"}]},
     {"name": "decimals", "type": "function", "stateMutability": "view",
      "inputs": [], "outputs": [{"name": "", "type": "uint8"}]},
     {"name": "approve", "type": "function", "stateMutability": "nonpayable",
      "inputs": [{"name": "s", "type": "address"}, {"name": "v", "type": "uint256"}],
      "outputs": [{"name": "", "type": "bool"}]},
 ]
+
+
+def allowance(token, owner, spender):
+    w3 = _w3()
+    c = w3.eth.contract(address=w3.to_checksum_address(token), abi=ERC20_ABI)
+    return c.functions.allowance(w3.to_checksum_address(owner),
+                                 w3.to_checksum_address(spender)).call()
 
 
 def token_balance(token):
@@ -85,6 +95,41 @@ def exit_safety(token, notional_usd, max_tax=None):
     return ok, reason, measured
 
 
+def _ensure_allowance(w3, acct, token, spender, amount, nonce):
+    """Approve only when needed, then PROVE the approval took before moving on.
+
+    The first Base round trip died with TransferHelper: TRANSFER_FROM_FAILED --
+    the router could not pull the USDC, i.e. no effective allowance at the
+    moment the swap was estimated. The old code sent an approve and trusted
+    the receipt without reading its status or re-reading the allowance, so a
+    reverted approve or a lagging node produced a swap failure with no
+    explanation. Every step now logs what it saw."""
+    import time as _t
+    have = allowance(token, acct.address, spender)
+    journal.log_event("evm_allowance", detail={"spender": spender, "have": have, "need": amount})
+    if have >= amount:
+        return
+    c = w3.eth.contract(address=w3.to_checksum_address(token), abi=ERC20_ABI)
+    tx = c.functions.approve(spender, amount).build_transaction({
+        "from": acct.address, "nonce": nonce, "chainId": CHAIN_ID,
+        "gasPrice": w3.eth.gas_price})
+    tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.2)
+    # to_hex, not .hex(): under web3 7 / hexbytes 1 the latter drops the 0x
+    # prefix, and a receipt lookup on a bare hash is how a landed swap turns
+    # into "timeout" and an orphaned holding.
+    h = w3.to_hex(w3.eth.send_raw_transaction(acct.sign_transaction(tx).raw_transaction))
+    rec = w3.eth.wait_for_transaction_receipt(h, timeout=90)
+    journal.log_event("evm_approve", detail={"tx": h, "status": rec["status"],
+                                             "block": rec["blockNumber"]})
+    if rec["status"] != 1:
+        raise RuntimeError(f"approve reverted: {h}")
+    for _ in range(10):                      # the node must SEE it before we lean on it
+        if allowance(token, acct.address, spender) >= amount:
+            return
+        _t.sleep(1)
+    raise RuntimeError(f"approve mined ({h}) but allowance still below {amount}")
+
+
 def swap(token_in, token_out, amount_raw, slippage_bps):
     """Build via Kyber, approve if needed, sign locally, send, return tx hash."""
     w3 = _w3()
@@ -105,14 +150,8 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
 
     nonce = w3.eth.get_transaction_count(acct.address)
     if token_in != NATIVE:
-        c = w3.eth.contract(address=w3.to_checksum_address(token_in), abi=ERC20_ABI)
-        approve = c.functions.approve(router, int(amount_raw)).build_transaction({
-            "from": acct.address, "nonce": nonce, "chainId": CHAIN_ID})
-        approve["gas"] = w3.eth.estimate_gas(approve)
-        signed = acct.sign_transaction(approve)
-        w3.eth.wait_for_transaction_receipt(w3.eth.send_raw_transaction(signed.raw_transaction),
-                                            timeout=90)
-        nonce += 1
+        _ensure_allowance(w3, acct, token_in, router, int(amount_raw), nonce)
+        nonce = w3.eth.get_transaction_count(acct.address)
 
     tx = {"from": acct.address, "to": router, "data": data["data"],
           "value": int(amount_raw) if token_in == NATIVE else 0,
@@ -122,7 +161,7 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
     if config.SIMULATE_BEFORE_SEND:
         w3.eth.call(tx)   # reverts here rather than costing gas on-chain
     signed = acct.sign_transaction(tx)
-    h = w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+    h = w3.to_hex(w3.eth.send_raw_transaction(signed.raw_transaction))
     journal.log_order(client_oid=h, venue="base",
                       asset_id=f"base:{token_out if token_in == USDC else token_in}",
                       side="buy" if token_in == USDC else "sell",
