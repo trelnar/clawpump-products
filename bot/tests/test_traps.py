@@ -18,7 +18,8 @@ os.environ.setdefault("TRADEBOT_DB", os.path.join(tempfile.mkdtemp(), "test.db")
 
 from tradebot import approval, config, execution, marketdata, monitor, state  # noqa: E402
 from tradebot.agent import runner  # noqa: E402
-from tradebot.exchanges import solana_dex  # noqa: E402
+from tradebot import journal  # noqa: E402
+from tradebot.exchanges import coinbase, solana_dex  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -150,6 +151,31 @@ class OrderSerialisation(Base):
             t.join(5)
         self.assertEqual(len(sent), 1, results)
         self.assertIn("no_position", results)
+
+
+class CoinbaseFees(Base):
+    """The venue reports fees; a sell yields gross minus fee, a buy costs
+    gross plus fee, and the fill row carries the fee."""
+
+    def _order(self, filled, avg, fee, value):
+        return {"status": "FILLED", "filled_size": str(filled),
+                "average_filled_price": str(avg), "total_fees": str(fee),
+                "filled_value": str(value), "order_id": "srv-9"}
+
+    def test_sell_proceeds_are_net_of_fee(self):
+        coinbase._products["FEE-USDC"] = {"quote_increment": "0.01",
+                                          "base_increment": "0.00000001"}
+        self.addCleanup(coinbase._products.clear)
+        state.upsert_position("cex:FEE-USDC", "coinbase", None, 2.0, 4.0)
+        state.set_cash("coinbase", 100.0)
+        self.patch(marketdata, "price", lambda a: 3.0)
+        self.patch(coinbase, "market_sell", lambda p, q: ("srv-9", {}))
+        self.patch(coinbase, "order_status", lambda o: self._order(2.0, 3.0, 0.04, 6.0))
+        self.assertEqual(execution.execute_sell("cex:FEE-USDC", "test"), "filled")
+        self.assertAlmostEqual(state.cash("coinbase"), 105.96)
+        row = journal.query("SELECT * FROM fills WHERE asset_id='cex:FEE-USDC' "
+                            "AND side='sell' ORDER BY ts DESC LIMIT 1")[0]
+        self.assertAlmostEqual(row["fee_usd"], 0.04)
 
 
 if __name__ == "__main__":

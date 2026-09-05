@@ -184,7 +184,10 @@ def _sanity_qty(qty, price, spent):
 
 def _await_coinbase(order_id, timeout=None):
     """Poll one order -- by the exchange's order_id, never a list read -- to a
-    terminal state. Returns (filled_qty, avg_price, spent_usd, status)."""
+    terminal state. Returns (filled_qty, avg_price, gross_usd, fee_usd, status).
+    gross is the venue's quote-currency total before fees: a buy costs
+    gross + fee, a sell yields gross - fee. Returning the sum for both sides
+    overstated every Coinbase sell's proceeds by twice the fee."""
     timeout = config.FILL_TIMEOUT_CEX_SEC if timeout is None else timeout
     terminal = ("FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED")
     t0, last = time.time(), None
@@ -205,7 +208,7 @@ def _await_coinbase(order_id, timeout=None):
     # filled_value is the venue's own quote-currency total; prefer it to our
     # arithmetic, which loses the per-fill price mix on a multi-fill order.
     gross = float(o.get("filled_value") or 0) or qty * avg
-    return qty, avg, gross + fee, st
+    return qty, avg, gross, fee, st
 
 
 def _cancel_quietly(order_id):
@@ -315,13 +318,15 @@ def execute_buy(ticket, ref_price):
     notional = ticket["notional_usd"]
     entry_liq = _entry_liquidity(asset, chain)  # baseline before we move the pool
     measured = True
+    fee = None                                   # venue fee when the venue reports one
     try:
         if venue == "coinbase":
             product = asset.split(":", 1)[1]
             _bid, ask = coinbase.best_price(product)
             limit = (ask or ref_price) * 1.0025  # marketable limit, tier cap
             oid, _ = coinbase.limit_buy(product, notional, limit)
-            qty, avg, spent, st = _await_coinbase(oid)
+            qty, avg, gross, fee, st = _await_coinbase(oid)
+            spent = gross + fee
             if st != "FILLED":
                 _cancel_quietly(oid)  # stop the unfilled remainder
             if qty <= 0:
@@ -403,7 +408,7 @@ def execute_buy(ticket, ref_price):
         return "sanity_freeze"
     state.set_ticket_status(ticket["ticket_id"], "filled")
     journal.log_fill(client_oid=oid, asset_id=asset, side="buy", qty=qty,
-                     price=fill_price, fee_usd=None, venue=venue or chain, tx_ref=oid)
+                     price=fill_price, fee_usd=fee, venue=venue or chain, tx_ref=oid)
     alerts.action_alert("BOUGHT", asset, fill_price, {"Size": f"${spent:.2f}"})
     return "filled"
 
@@ -418,15 +423,16 @@ def execute_sell(asset_id, reason, fraction=1.0):
     venue, chain = pos["venue"], pos["chain"]
     qty = pos["qty"] * fraction
     price = marketdata.price(asset_id) or 0
+    fee = None
     try:
         if venue == "coinbase":
             product = asset_id.split(":", 1)[1]
             oid, _ = coinbase.market_sell(product, qty)
-            sold, avg, gross, st = _await_coinbase(oid)
+            sold, avg, gross, fee, st = _await_coinbase(oid)
             if sold <= 0:
                 raise RuntimeError(f"no fill ({st})")
             qty, price = sold, (avg or price)
-            proceeds = gross
+            proceeds = gross - fee
         elif chain == "solana":
             mint = asset_id.split(":", 1)[1]
             raw, _dec = solana_dex.token_balance(mint)
@@ -491,7 +497,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
         journal.log_event("partial_exit", asset_id,
                           {"requested": fraction, "sold_share": round(sold_share, 4)})
     journal.log_fill(client_oid=oid, asset_id=asset_id, side="sell", qty=qty,
-                     price=price, fee_usd=None, venue=venue or chain, tx_ref=oid)
+                     price=price, fee_usd=fee, venue=venue or chain, tx_ref=oid)
     alerts.sell_alert(asset_id, price, reason,
                       pnl_pct=(pnl / cost_part) if cost_part else None)
     return "filled"
