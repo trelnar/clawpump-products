@@ -37,9 +37,13 @@ def _throttled(e):
     instead (-32005 / 'rate limit' / 'limit exceeded'), which arrive as a
     Web3RPCError and would otherwise read as a real error."""
     txt = repr(e).lower()
+    # Any 5xx from a public node is the node's problem, not ours: llamarpc
+    # answered a sell with a 521 and, unlisted, it ended the attempt instead
+    # of rotating.
     return any(m in txt for m in ("429", "too many", "connectionerror", "timed out",
-                                   "503", "502", "rate limit", "-32005",
-                                   "limit exceeded", "capacity"))
+                                   "rate limit", "-32005", "limit exceeded", "capacity",
+                                   "500 server", "502", "503", "504", "520", "521",
+                                   "522", "523", "524"))
 
 
 def _rotate(e):

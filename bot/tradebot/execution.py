@@ -406,8 +406,10 @@ def execute_sell(asset_id, reason, fraction=1.0):
             before = solana_dex.usdc_balance()
             sig, _q = solana_dex.swap(mint, solana_dex.USDC_MINT, amt, 600)
             res = _await_solana(sig)
+            if res == "failed":
+                raise RuntimeError("swap failed on-chain")
             if res != "ok":
-                raise RuntimeError(f"swap {res}")
+                _landed_by_balance(lambda: solana_dex.usdc_balance(), before, sig)
             proceeds = solana_dex.usdc_balance() - before
             oid = sig
         elif chain == "base":
@@ -419,8 +421,10 @@ def execute_sell(asset_id, reason, fraction=1.0):
             before = evm_dex.usdc_balance()
             oid = evm_dex.swap(token, evm_dex.USDC, amt, 600)
             res = _await_evm(oid)
-            if res != "confirmed":
-                raise RuntimeError(f"swap {res}")
+            if res == "failed":
+                raise RuntimeError("swap reverted on-chain")
+            if res != "confirmed":   # the USDC arriving is the fact, not the receipt
+                _landed_by_balance(lambda: evm_dex.usdc_balance(), before, oid)
             proceeds = evm_dex.usdc_balance() - before
         else:
             return "manual_only"
