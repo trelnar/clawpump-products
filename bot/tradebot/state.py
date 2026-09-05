@@ -56,13 +56,26 @@ def _migrate():
                 journal.conn().execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
                 journal.conn().commit()
             journal.log_event("schema_migrate", detail=f"{table}.{col}")
-    # Base ids written before norm_asset existed may carry checksum case.
+    # Base ids written before norm_asset existed may carry checksum case. If
+    # both spellings of one asset exist, they are one holding: merge, never
+    # leave the checksum row behind where no lookup can find it again.
     with journal._lock:
         c = journal.conn()
+        dupes = c.execute("SELECT asset_id, qty, cost_basis_usd FROM positions WHERE "
+                          "asset_id LIKE 'base:0x%' AND asset_id != lower(asset_id) AND "
+                          "lower(asset_id) IN (SELECT asset_id FROM positions)").fetchall()
+        for d in dupes:
+            c.execute("UPDATE positions SET qty=qty+?, cost_basis_usd=cost_basis_usd+? "
+                      "WHERE asset_id=lower(?)", (d[1] or 0, d[2] or 0, d[0]))
+            c.execute("DELETE FROM positions WHERE asset_id=?", (d[0],))
+        c.execute("DELETE FROM whitelist WHERE asset_id LIKE 'base:0x%' AND "
+                  "asset_id != lower(asset_id) AND lower(asset_id) IN (SELECT asset_id FROM whitelist)")
         for table in ("positions", "whitelist", "tickets", "pending_approvals"):
-            c.execute(f"UPDATE OR IGNORE {table} SET asset_id=lower(asset_id) "
+            c.execute(f"UPDATE {table} SET asset_id=lower(asset_id) "
                       "WHERE asset_id LIKE 'base:0x%' AND asset_id != lower(asset_id)")
         c.commit()
+    for d in dupes:     # journal takes the same non-reentrant lock: log after release
+        journal.log_event("schema_migrate", d[0], "merged into lowercase position")
 
 
 def init():

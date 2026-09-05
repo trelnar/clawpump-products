@@ -311,6 +311,21 @@ class AssetIdSpelling(Base):
         self.assertTrue(state.is_whitelisted(mixed.lower()))
         state.close_position(mixed.lower())
 
+    def test_migration_merges_both_spellings_into_one_holding(self):
+        from tradebot import state
+        mixed = "base:0xAbCdEf" + "2" * 34
+        state.upsert_position(mixed, "base", "base", 1.0, 5.0)
+        state.upsert_position(mixed.lower(), "base", "base", 2.0, 10.0)
+        state.whitelist_add(mixed, "base")
+        state.whitelist_add(mixed.lower(), "base")
+        state._migrate()
+        self.assertIsNone(state.get_position(mixed))
+        p = state.get_position(mixed.lower())
+        self.assertAlmostEqual(p["qty"], 3.0)
+        self.assertAlmostEqual(p["cost_basis_usd"], 15.0)
+        self.assertTrue(state.is_whitelisted(mixed.lower()))
+        state.close_position(mixed.lower())
+
     def test_discovery_dedupes_across_case(self):
         from tradebot import config, marketdata, signals, state
         from tradebot.agent import runner
