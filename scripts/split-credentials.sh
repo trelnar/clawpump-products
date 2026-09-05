@@ -26,11 +26,14 @@ getent group tbdata >/dev/null || groupadd --system tbdata
 
 # 2. the research user: its own primary group, plus tbdata for the database.
 #    Deliberately NOT in group `bot`, which owns the trading credentials.
+#    The first version created the user with -g bot and no `agent` group, so
+#    on an upgraded box the group must be created before the user is moved
+#    into it -- `chown root:agent` failed on exactly that and aborted here.
+getent group agent >/dev/null || groupadd --system agent
 if id -u agent >/dev/null 2>&1; then
-  usermod -g agent -G tbdata agent 2>/dev/null || true
+  usermod -g agent -G tbdata agent
 else
-  useradd --system --no-create-home --shell /usr/sbin/nologin --user-group agent
-  usermod -aG tbdata agent
+  useradd --system --no-create-home --shell /usr/sbin/nologin -g agent -G tbdata agent
 fi
 usermod -aG tbdata bot
 
@@ -66,6 +69,16 @@ done
 sudo -u agent test -r "$AGENT_ENV" && echo "ok    agent can read its own env" || echo "FAIL  agent cannot read $AGENT_ENV"
 sudo -u agent test -w "$DATA" && echo "ok    agent can write the database" || echo "FAIL  agent cannot write $DATA"
 
+# 6. install the unit files. deploy.sh COPIES them into systemd, so a git pull
+#    alone never changes what is running; the corrected agent unit (its own
+#    group, tbdata supplementary) sat uninstalled while the old one kept
+#    running as before.
+cp /opt/tradebot/systemd/tradebot-core.service /opt/tradebot/systemd/tradebot-agent.service \
+   /etc/systemd/system/
+systemctl daemon-reload
+echo "units     : installed and reloaded"
+echo "agent runs: $(systemctl show -p User -p Group --value tradebot-agent | paste -sd/)  (want agent/agent)"
+
 echo
-echo "Now: systemctl daemon-reload && systemctl restart tradebot-core tradebot-agent"
+echo "Now: systemctl restart tradebot-core tradebot-agent"
 echo "Every line above must read 'ok'. Never cat the secrets file to check."
