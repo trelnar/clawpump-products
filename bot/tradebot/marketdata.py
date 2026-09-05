@@ -44,15 +44,38 @@ def coinbase_spot(product_id):
     raise first
 
 
+def _same_addr(a, b):
+    return (a or "").lower() == (b or "").lower()
+
+
 def dexscreener_token(chain, address):
-    """Pairs for a token. chain: 'solana' | 'base'."""
+    """Pairs for a token. chain: 'solana' | 'base'.
+
+    priceUsd on a pair is the BASE token's price. A token that sits on the
+    quote side of its deepest pair -- USDT under a SOL/USDT pool, say -- was
+    being marked at the other token's price (USDT came back as $0.067). The
+    mark feeds the invalidation stop, so that is a stop firing on a number that
+    belongs to a different asset. Prefer pairs where we are the base; when we
+    are only ever the quote, invert priceUsd/priceNative, which is our price."""
     j = _get(f"https://api.dexscreener.com/latest/dex/tokens/{address}")
     pairs = [p for p in (j.get("pairs") or []) if p.get("chainId") == chain]
     if not pairs:
         return None
-    best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+    liq = lambda p: (p.get("liquidity") or {}).get("usd") or 0  # noqa: E731
+    as_base = [p for p in pairs if _same_addr((p.get("baseToken") or {}).get("address"), address)]
+    as_quote = [p for p in pairs if _same_addr((p.get("quoteToken") or {}).get("address"), address)]
+    if as_base:
+        best, px = max(as_base, key=liq), None
+        px = float(best.get("priceUsd") or 0)
+    elif as_quote:
+        best = max(as_quote, key=liq)
+        base_usd = float(best.get("priceUsd") or 0)
+        base_in_ours = float(best.get("priceNative") or 0)
+        px = (base_usd / base_in_ours) if base_in_ours > 0 else 0.0
+    else:
+        return None
     return {
-        "price": float(best.get("priceUsd") or 0),
+        "price": px,
         "liquidity_usd": float((best.get("liquidity") or {}).get("usd") or 0),
         "volume_h24": float((best.get("volume") or {}).get("h24") or 0),
         "pair_address": best.get("pairAddress"),

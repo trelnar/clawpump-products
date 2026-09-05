@@ -541,6 +541,47 @@ class GasFloor(Base):
         self.assertEqual(cm.exception.rule, "gas_unknown")
 
 
+class PairSide(Base):
+    """priceUsd is the BASE token's price. USDT under a SOL/USDT pool was
+    marked at $0.067 -- a different asset's number, feeding the stop."""
+
+    USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+    def _pairs(self, pairs):
+        from tradebot import marketdata
+        self.patch(marketdata, "_get", lambda url, **k: {"pairs": pairs})
+        return marketdata
+
+    def _pair(self, base, quote, price_usd, price_native, liq):
+        return {"chainId": "solana", "priceUsd": str(price_usd),
+                "priceNative": str(price_native), "liquidity": {"usd": liq},
+                "baseToken": {"address": base, "symbol": "B"},
+                "quoteToken": {"address": quote, "symbol": "Q"}}
+
+    def test_a_base_side_pair_is_preferred_over_a_deeper_quote_side_one(self):
+        md = self._pairs([
+            self._pair("OTHERMINT", self.USDT, 0.067, 0.067, 9_000_000),   # we are quote
+            self._pair(self.USDT, "USDCMINT", 1.0004, 1.0004, 500_000),    # we are base
+        ])
+        self.assertAlmostEqual(md.dexscreener_token("solana", self.USDT)["price"], 1.0004)
+
+    def test_a_quote_only_token_is_inverted_correctly(self):
+        # SOL/USDT pool: SOL is base at $100, priceNative 100 USDT per SOL.
+        md = self._pairs([self._pair("SOLMINT", self.USDT, 100.0, 100.0, 5_000_000)])
+        self.assertAlmostEqual(md.dexscreener_token("solana", self.USDT)["price"], 1.0)
+
+    def test_evm_addresses_match_case_insensitively(self):
+        md = self._pairs([self._pair("0xABCDEF", "0xUSDC", 2.5, 2.5, 1000)])
+        md_pairs = [self._pair("0xABCDEF", "0xUSDC", 2.5, 2.5, 1000)]
+        md_pairs[0]["chainId"] = "base"
+        self.patch(md, "_get", lambda url, **k: {"pairs": md_pairs})
+        self.assertAlmostEqual(md.dexscreener_token("base", "0xabcdef")["price"], 2.5)
+
+    def test_a_pair_we_are_on_neither_side_of_is_ignored(self):
+        md = self._pairs([self._pair("X", "Y", 3.0, 3.0, 1000)])
+        self.assertIsNone(md.dexscreener_token("solana", self.USDT))
+
+
 class NoBalanceOnSell(Base):
     """A zero balance read is not proof the position is gone -- it is also a
     lagging RPC, a wSOL unwrap, or the wrong mint. The wSOL round trip deleted

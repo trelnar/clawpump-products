@@ -152,6 +152,22 @@ def exit_safety(mint, notional_usd, max_tax=None):
     return ok, reason, measured
 
 
+# Jupiter program custom error codes worth naming in a log line.
+JUP_ERRORS = {6000: "EmptyRoute", 6001: "SlippageToleranceExceeded",
+              6002: "InvalidCalculation", 6003: "MissingPlatformFeeAccount",
+              6004: "InvalidSlippage", 6005: "NotEnoughPercent",
+              6008: "NotEnoughAccountKeys", 6016: "InsufficientFunds"}
+
+
+def _decode_err(err):
+    """{'InstructionError': [3, {'Custom': 6001}]} -> 'SlippageToleranceExceeded (6001)'"""
+    try:
+        code = err["InstructionError"][1]["Custom"]
+        return f"{JUP_ERRORS.get(code, 'Custom')} ({code})"
+    except Exception:
+        return str(err)
+
+
 def simulate(signed_tx_b64):
     """Dry-run before broadcast. Jupiter builds the transaction and we sign it
     blind otherwise -- a compromised or hijacked aggregator response would be
@@ -161,25 +177,49 @@ def simulate(signed_tx_b64):
                                 "replaceRecentBlockhash": True}])
     val = res.get("value") or {}
     if val.get("err"):
-        raise RuntimeError(f"simulation failed: {val['err']} "
-                           f"{(val.get('logs') or [])[-3:]}")
+        raise SimulationFailed(_decode_err(val["err"]), val["err"])
     return val
 
 
+class SimulationFailed(RuntimeError):
+    def __init__(self, reason, raw):
+        super().__init__(f"simulation failed: {reason}")
+        self.reason, self.raw = reason, raw
+
+    @property
+    def stale_quote(self):
+        return "Slippage" in self.reason
+
+
 def swap(input_mint, output_mint, amount_raw, slippage_bps):
-    """Quote -> signed VersionedTransaction -> simulate -> send."""
+    """Quote -> signed VersionedTransaction -> simulate -> send.
+
+    A quote is a snapshot of pool state and goes stale within seconds; the
+    simulation is what catches that, and it did on the first Solana round trip
+    (SlippageToleranceExceeded). One fresh quote and retry is the right
+    response to a stale quote. A second failure is real, and nothing is sent."""
     from solders.transaction import VersionedTransaction
     kp = _keypair()
-    q = quote(input_mint, output_mint, amount_raw, slippage_bps)
-    tx_b64 = jupiter("/swap", method="POST", json={
-        "quoteResponse": q, "userPublicKey": str(kp.pubkey()),
-        "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
-        "prioritizationFeeLamports": "auto"})["swapTransaction"]
-    tx = VersionedTransaction.from_bytes(base64.b64decode(tx_b64))
-    signed = VersionedTransaction(tx.message, [kp])
-    raw_b64 = base64.b64encode(bytes(signed)).decode()
-    if config.SIMULATE_BEFORE_SEND:
-        simulate(raw_b64)   # raises, and the caller never broadcasts
+    last = None
+    for attempt in range(2):
+        q = quote(input_mint, output_mint, amount_raw, slippage_bps)
+        tx_b64 = jupiter("/swap", method="POST", json={
+            "quoteResponse": q, "userPublicKey": str(kp.pubkey()),
+            "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
+            "prioritizationFeeLamports": "auto"})["swapTransaction"]
+        tx = VersionedTransaction.from_bytes(base64.b64decode(tx_b64))
+        signed = VersionedTransaction(tx.message, [kp])
+        raw_b64 = base64.b64encode(bytes(signed)).decode()
+        if not config.SIMULATE_BEFORE_SEND:
+            break
+        try:
+            simulate(raw_b64)   # raises, and nothing is broadcast
+            break
+        except SimulationFailed as e:
+            last = e
+            if not e.stale_quote or attempt == 1:
+                raise
+            journal.log_event("swap_requote", detail=f"{e.reason}; re-quoting once")
     sig = _rpc("sendTransaction",
                [raw_b64, {"encoding": "base64", "skipPreflight": False}])
     journal.log_order(client_oid=sig, venue="solana",
