@@ -8,6 +8,7 @@
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -17,6 +18,7 @@ os.environ.setdefault("TRADEBOT_DB", os.path.join(tempfile.mkdtemp(), "test.db")
 
 from tradebot import approval, config, execution, marketdata, monitor, state  # noqa: E402
 from tradebot.agent import runner  # noqa: E402
+from tradebot.exchanges import solana_dex  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -114,6 +116,40 @@ class RejectCooldown(Base):
         out = runner.gather()
         self.assertEqual(looked, ["MintE"])
         self.assertEqual([c["address"] for c in out], ["MintE"])
+
+
+class OrderSerialisation(Base):
+    def test_concurrent_sells_place_one_order(self):
+        """FLATTEN on the Telegram thread and the monitor's sell on the core
+        thread hit the same position at once: exactly one swap is sent."""
+        state.upsert_position("solana:MintF", "solana", "solana", 100.0, 5.0)
+        marketdata._price_cache.clear()
+        self.patch(marketdata, "price", lambda a: 0.05)
+        sent, go = [], threading.Event()
+
+        def swap(*a, **k):
+            sent.append(a)
+            go.wait(2)            # hold the lock so the second caller queues
+            return "sig1", {}
+        self.patch(solana_dex, "swap", swap)
+        # balance: 100 tokens before the first sell, zero once it is done
+        self.patch(solana_dex, "token_balance",
+                   lambda m: (0, 6) if sent else (100_000_000, 6))
+        cash = iter([0.0, 5.0, 5.0, 5.0])
+        self.patch(solana_dex, "usdc_balance", lambda: next(cash, 5.0))
+        self.patch(execution, "_await_solana", lambda sig: "ok")
+        self.patch(execution, "_no_balance", lambda a, p: "no_balance")
+        results = []
+        ts = [threading.Thread(target=lambda: results.append(
+            execution.execute_sell("solana:MintF", r))) for r in ("FLATTEN", "monitor")]
+        for t in ts:
+            t.start()
+        time.sleep(0.2)
+        go.set()
+        for t in ts:
+            t.join(5)
+        self.assertEqual(len(sent), 1, results)
+        self.assertIn("no_position", results)
 
 
 if __name__ == "__main__":

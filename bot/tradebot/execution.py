@@ -1,6 +1,8 @@
 """execution skill: gate sequence + order lifecycle. Sells always execute;
 buys pass five gates. All gates are code — no model call on the trade path."""
+import functools
 import json
+import threading
 import time
 
 from . import alerts, approval, config, journal, marketdata, risk, state
@@ -287,6 +289,25 @@ def _settled_qty(read_raw, before, decimals, fallback_raw=0):
     raise RuntimeError(f"swap confirmed but quantity unreadable: {last_err}")
 
 
+# Orders come from two threads: the core loop (buys, monitor sells) and the
+# Telegram poller (FLATTEN, and approvals before they moved to the core). With
+# no mutex, FLATTEN could sell a position the monitor was mid-way through
+# selling -- two exits for one holding, the second of which fails or, worse,
+# partially fills against a stale quantity. One lock, held for the whole
+# place-confirm-book sequence, means the second caller sees the books as the
+# first left them. Cost: a FLATTEN waits for an in-flight order to settle.
+_order_lock = threading.RLock()
+
+
+def _serialised(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with _order_lock:
+            return fn(*a, **k)
+    return wrapper
+
+
+@_serialised
 def execute_buy(ticket, ref_price):
     """Every venue books the quantity it actually received, in whole units,
     and the dollars it actually spent. Nothing is booked before confirmation."""
@@ -387,6 +408,7 @@ def execute_buy(ticket, ref_price):
     return "filled"
 
 
+@_serialised
 def execute_sell(asset_id, reason, fraction=1.0):
     """Sells are never gated. Prefer a worse fill over an unfilled exit -- but
     an unconfirmed exit is not an exit: the position stays on the books."""
