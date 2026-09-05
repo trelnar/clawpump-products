@@ -143,9 +143,13 @@ def supervise_agent():
     r = journal.query("SELECT MAX(ts) t FROM events WHERE kind='agent_cycle'")
     last = (r[0]["t"] if r and r[0]["t"] else 0)
     stale = time.time() - last
+    fatal = _report_fatal_agent_error(last)
     if last and stale < config.AGENT_STALE_SEC:
-        if state.get_kv("agent_alerted"):
+        if fatal:
+            return   # a fresh cycle before the error is not a recovery
+        if state.get_kv("agent_alerted") or state.get_kv("agent_fatal"):
             state.set_kv("agent_alerted", "")
+            state.set_kv("agent_fatal", "")
             alerts.ops("Research layer is producing cycles again.")
         return
     if state.get_kv("agent_alerted") or not last:
@@ -156,6 +160,38 @@ def supervise_agent():
     alerts.ops(f"Research layer has completed no cycle in {stale / 3600:.1f}h. "
                f"Trading and exits are unaffected. Last error: "
                f"{(e[0]['detail'] if e else 'none recorded')[:200]}")
+
+
+# Errors that no amount of waiting fixes. The staleness watchdog would report
+# them eventually, 45 minutes later and truncated to the exception's repr
+# prefix; on 2026-09-05 the API ran out of credits at 18:30 and the operator
+# learned it from a database query. These are reported at once, in plain words.
+FATAL_AGENT_PATTERNS = (
+    ("credit balance", "Anthropic API credits are exhausted. Top up at "
+                       "console.anthropic.com (Plans & Billing); research resumes by itself."),
+    ("invalid x-api-key", "The Anthropic API key is invalid or revoked."),
+    ("authentication_error", "The Anthropic API key is being rejected."),
+    ("permission_error", "The Anthropic API key lacks permission for this model."),
+    ("not_found_error", "The configured Claude model was not found."),
+)
+
+
+def _report_fatal_agent_error(since_ts):
+    """Alert once per distinct fatal error newer than the last good cycle.
+    Returns True while such an error is outstanding."""
+    e = journal.query("SELECT ts, detail FROM events WHERE kind='agent_loop_error' "
+                      "AND ts > ? ORDER BY ts DESC LIMIT 1", (since_ts,))
+    if not e:
+        return False
+    low = (e[0]["detail"] or "").lower()
+    for needle, text in FATAL_AGENT_PATTERNS:
+        if needle in low:
+            key = f"fatal:{needle}"
+            if state.get_kv("agent_fatal") != key:
+                state.set_kv("agent_fatal", key)
+                alerts.ops(f"RESEARCH STOPPED: {text} Trading and exits are unaffected.")
+            return True
+    return False
 
 
 def main():

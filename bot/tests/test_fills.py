@@ -887,10 +887,37 @@ class AgentWatchdog(Base):
         self.said = []
         self.patch(core.alerts, "ops", self.said.append)
         state.set_kv("agent_alerted", "")
+        state.set_kv("agent_fatal", "")
         # MAX(ts) reads the whole table, so a row from a sibling test would
         # decide this one's verdict.
-        journal.conn().execute("DELETE FROM events WHERE kind='agent_cycle'")
+        journal.conn().execute("DELETE FROM events WHERE kind IN ('agent_cycle','agent_loop_error')")
         journal.conn().commit()
+
+    def _error(self, ago, text):
+        import time as t
+        self.journal.conn().execute(
+            "INSERT INTO events (ts, kind, detail) VALUES (?, 'agent_loop_error', ?)",
+            (t.time() - ago, text))
+        self.journal.conn().commit()
+
+    def test_exhausted_credits_are_reported_at_once(self):
+        self._cycle(120)                       # not stale yet
+        self._error(30, "BadRequestError(\"Error code: 400 - {'type': 'error', 'error': "
+                        "{'type': 'invalid_request_error', 'message': 'Your credit balance "
+                        "is too low to access the Anthropic API.'}}\")")
+        self.core.supervise_agent()
+        self.core.supervise_agent()
+        self.assertEqual(len(self.said), 1)
+        self.assertIn("credits are exhausted", self.said[0])
+        self._cycle(5)                         # topped up, cycle completed
+        self.core.supervise_agent()
+        self.assertIn("again", self.said[1])
+
+    def test_an_error_older_than_the_last_cycle_is_ignored(self):
+        self._error(600, "credit balance is too low")
+        self._cycle(120)
+        self.core.supervise_agent()
+        self.assertEqual(self.said, [])
 
     def _cycle(self, ago):
         import time as t
