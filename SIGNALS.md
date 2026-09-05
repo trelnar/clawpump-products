@@ -29,7 +29,7 @@ and `$TICKER`s are extracted and stored.
 | `gecko` | GeckoTerminal trending + new pools on Solana and Base | nothing | on |
 | `pumpfun` | pump.fun launches, king-of-the-hill, **graduations** (the canonical Solana memecoin event) | nothing | on |
 | `clanker` | new token deploys on Base via Clanker | nothing | on |
-| `reddit` | new posts in `REDDIT_SUBS` (CryptoMoonShots, solana, memecoins, SolanaMemeCoins, base), upvote-weighted | nothing | on |
+| `reddit` | new posts in `REDDIT_SUBS` (CryptoMoonShots, solana, memecoins, SolanaMemeCoins, base), upvote-weighted | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` (free; Reddit 403s datacenter IPs without them) | on, fails until keyed |
 | `farcaster` | cast search for addresses/tickers, via Neynar | `NEYNAR_API_KEY` (free tier) | off until keyed |
 | `birdeye` | holder-count growth on the top 5 rising Solana assets | `BIRDEYE_API_KEY` (free tier) | off until keyed |
 | `telegram` | new messages in `TG_CHANNELS`, as `call` events — separate daemon | `TG_API_ID`, `TG_API_HASH`, `TG_CHANNELS`, one-time login | off until set |
@@ -63,6 +63,8 @@ sudo nano /etc/tradebot/agent.env
 Add whichever lines you have:
 
 ```
+REDDIT_CLIENT_ID=...      # https://www.reddit.com/prefs/apps -> create app -> type "script"
+REDDIT_CLIENT_SECRET=...  #   redirect uri can be http://localhost; id is under the app name
 NEYNAR_API_KEY=...        # https://neynar.com  (free)
 BIRDEYE_API_KEY=...       # https://bds.birdeye.so  (free "Standard" tier)
 TG_API_ID=...             # https://my.telegram.org -> API development tools

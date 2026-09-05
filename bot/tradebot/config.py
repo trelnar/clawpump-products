@@ -77,6 +77,8 @@ PUMPFUN_LIMIT = 50
 PUMPFUN_MIN_MCAP_USD = float(env("PUMPFUN_MIN_MCAP_USD", "15000"))
 REDDIT_SUBS = [x.strip() for x in env(
     "REDDIT_SUBS", "CryptoMoonShots,solana,memecoins,SolanaMemeCoins,base").split(",") if x.strip()]
+REDDIT_CLIENT_ID = env("REDDIT_CLIENT_ID")       # free 'script' app: reddit.com/prefs/apps
+REDDIT_CLIENT_SECRET = env("REDDIT_CLIENT_SECRET")
 NEYNAR_API_KEY = env("NEYNAR_API_KEY")
 BIRDEYE_API_KEY = env("BIRDEYE_API_KEY")
 BIRDEYE_MAX_PER_PASS = 5

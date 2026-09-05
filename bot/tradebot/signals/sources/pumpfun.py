@@ -3,10 +3,12 @@ UNOFFICIAL -- this is the site's frontend API and its shape has changed
 before. Everything is read with .get() and a missing field skips the coin
 rather than raising.
 
-Three reads per pass, each budget-checked:
-  /coins?sort=market_cap&order=DESC       -> launch: created < 6h and mcap >= min.
-     (sorting by created_timestamp only ever showed the last few minutes of
-      10-20 launches/min, all at $4-6k mcap, so 'launch' was ~0 forever)
+Reads per pass, each budget-checked:
+  /coins?sort=last_trade_timestamp        -> launch: created < 6h and mcap >= min,
+  /coins?sort=market_cap&order=DESC          from what is trading now and from the
+                                             top of the curve (the top-50 by mcap
+                                             alone are all old; created_timestamp
+                                             alone is the last few minutes at $5k)
   /coins?sort=last_trade_timestamp&complete=true -> graduation (bonding curve
      filled; the hardest momentum event on Solana memecoins)
   /coins/king-of-the-hill                  -> trending
@@ -95,6 +97,7 @@ def _koth(c, now):
 
 
 READS = (
+    ("/coins", {"sort": "last_trade_timestamp", "order": "DESC", "complete": "false"}, _launch),
     ("/coins", {"sort": "market_cap", "order": "DESC"}, _launch),
     ("/coins", {"sort": "last_trade_timestamp", "order": "DESC", "complete": "true"}, _graduation),
     ("/coins/king-of-the-hill", {}, _koth),

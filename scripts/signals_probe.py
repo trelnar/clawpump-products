@@ -55,7 +55,7 @@ def main():
         print("events in the last hour, by source and kind:")
         for r in rows:
             print(f"  {r['source']:12s} {r['kind']:14s} {r['n']}")
-    expected = {"pumpfun": {"launch", "graduation", "trending"},
+    expected = {"pumpfun": {"launch", "graduation"},
                 "gecko": {"trending", "new_pool"}, "reddit": {"post"},
                 "clanker": {"launch"}}
     got = {}
