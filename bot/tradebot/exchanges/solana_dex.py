@@ -232,8 +232,14 @@ def swap(input_mint, output_mint, amount_raw, slippage_bps):
                 raise
         t_sim = _t.time()
         try:
+            # preflightCommitment must match the commitment we read balances
+            # at. The default is finalized, ~13s behind confirmed: a sell placed
+            # within that window after a buy was refused by preflight because,
+            # at finalized state, the tokens had not arrived yet -- while our
+            # own simulation at confirmed had just passed.
             sig = _rpc("sendTransaction",
-                       [raw_b64, {"encoding": "base64", "skipPreflight": False}])
+                       [raw_b64, {"encoding": "base64", "skipPreflight": False,
+                                  "preflightCommitment": "confirmed"}])
         except RuntimeError as e:
             if "BlockhashNotFound" in str(e) and attempt == 0:
                 journal.log_event("swap_rebuild", detail=(
