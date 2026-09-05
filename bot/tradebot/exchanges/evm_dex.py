@@ -33,9 +33,13 @@ def _w3():
 
 
 def _throttled(e):
-    txt = repr(e)
-    return ("429" in txt or "Too Many" in txt or "ConnectionError" in txt
-            or "timed out" in txt or "503" in txt or "502" in txt)
+    """HTTP 429s, and the JSON-RPC-level rate limits some public nodes return
+    instead (-32005 / 'rate limit' / 'limit exceeded'), which arrive as a
+    Web3RPCError and would otherwise read as a real error."""
+    txt = repr(e).lower()
+    return any(m in txt for m in ("429", "too many", "connectionerror", "timed out",
+                                   "503", "502", "rate limit", "-32005",
+                                   "limit exceeded", "capacity"))
 
 
 def _rotate(e):

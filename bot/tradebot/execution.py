@@ -233,6 +233,27 @@ def _await_evm(tx_hash, timeout=None):
     return "timeout"
 
 
+def _landed_by_balance(read_raw, before, tx_ref):
+    """Receipt polling timed out. Ask the wallet instead.
+
+    The third Base round trip landed on-chain -- 0.002 WETH in the wallet, USDC
+    down five dollars -- while the receipt endpoint answered 'unknown' for the
+    full 180 seconds, so the buy was booked as a timeout and the tokens were
+    orphaned with no position row. The receipt is a convenience; the balance
+    is the fact. A raised balance means the swap landed, and we proceed as
+    confirmed. An unchanged one after the retries means it genuinely did not."""
+    for attempt in range(config.SETTLE_READ_TRIES):
+        try:
+            if read_raw() > before:
+                journal.log_event("confirmed_by_balance", detail=str(tx_ref))
+                return "ok"
+        except Exception as e:
+            journal.log_event("balance_read_fail", detail=str(e)[:120])
+        if attempt + 1 < config.SETTLE_READ_TRIES:
+            time.sleep(config.SETTLE_READ_SLEEP_SEC)
+    raise RuntimeError(f"swap timeout and no tokens arrived ({tx_ref})")
+
+
 def _settled_qty(read_raw, before, decimals, fallback_raw=0):
     """Quantity received by a swap that has ALREADY confirmed.
 
@@ -284,8 +305,14 @@ def execute_buy(ticket, ref_price):
             sig, q = solana_dex.swap(solana_dex.USDC_MINT, mint,
                                      int(notional * 1e6), 300)
             res = _await_solana(sig)
+            if res == "failed":
+                raise RuntimeError("swap failed on-chain")
             if res != "ok":
-                raise RuntimeError(f"swap {res}")
+                # The signature poll timed out. The wallet decides, not the
+                # RPC: if the tokens arrived the swap landed, whatever the
+                # status endpoint managed to say about it.
+                res = _landed_by_balance(lambda: solana_dex.token_balance(mint)[0],
+                                         before, sig)
             qty, measured = _settled_qty(
                 lambda: solana_dex.token_balance(mint)[0], before, dec,
                 fallback_raw=int((q or {}).get("outAmount") or 0))
@@ -296,8 +323,11 @@ def execute_buy(ticket, ref_price):
             before, dec = evm_dex.token_balance(token)
             oid = evm_dex.swap(evm_dex.USDC, token, int(notional * 1e6), 300)
             res = _await_evm(oid)
+            if res == "failed":
+                raise RuntimeError("swap reverted on-chain")
             if res != "confirmed":
-                raise RuntimeError(f"swap {res}")
+                res = _landed_by_balance(lambda: evm_dex.token_balance(token)[0],
+                                         before, oid)
             qty, measured = _settled_qty(
                 lambda: evm_dex.token_balance(token)[0], before, dec)
             spent, fill_price = notional, ref_price

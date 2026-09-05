@@ -135,8 +135,9 @@ class BaseChainBuy(Base):
     def setUp(self):
         super().setUp()
         self.patch(execution, "_entry_liquidity", lambda a, c: 50_000.0)
+        self.patch(config, "SETTLE_READ_SLEEP_SEC", 0)
 
-    def test_pending_tx_is_not_a_fill(self):
+    def test_pending_tx_with_no_tokens_is_not_a_fill(self):
         self.patch(evm_dex, "token_balance", lambda t: (0, 18))
         self.patch(evm_dex, "swap", lambda *a, **k: "0xdead")
         self.patch(evm_dex, "confirm", lambda h: "unknown")  # still pending
@@ -144,6 +145,25 @@ class BaseChainBuy(Base):
         r = execution.execute_buy(ticket("base:0xTOK", "base", "base"), 5.0)
         self.assertEqual(r, "failed")
         self.assertIsNone(state.get_position("base:0xTOK"))
+
+    def test_a_receipt_timeout_with_tokens_in_the_wallet_IS_a_fill(self):
+        # The orphan of 2026-09-05: swap landed, receipt endpoint said
+        # 'unknown' for 180s, buy booked as timeout, tokens invisible.
+        reads = iter([(0, 18)] + [(2 * 10 ** 18, 18)] * 10)
+        self.patch(evm_dex, "token_balance", lambda t: next(reads))
+        self.patch(evm_dex, "swap", lambda *a, **k: "0xlanded")
+        self.patch(evm_dex, "confirm", lambda h: "unknown")
+        self.patch(config, "FILL_TIMEOUT_EVM_SEC", 0)
+        r = execution.execute_buy(ticket("base:0xTOK3", "base", "base"), 5.0)
+        self.assertEqual(r, "filled")
+        self.assertAlmostEqual(state.get_position("base:0xTOK3")["qty"], 2.0)
+
+    def test_an_onchain_revert_is_still_a_failure(self):
+        self.patch(evm_dex, "token_balance", lambda t: (0, 18))
+        self.patch(evm_dex, "swap", lambda *a, **k: "0xrev")
+        self.patch(evm_dex, "confirm", lambda h: "failed")
+        r = execution.execute_buy(ticket("base:0xTOK4", "base", "base"), 5.0)
+        self.assertEqual(r, "failed")
 
     def test_confirmed_tx_books_the_balance_delta(self):
         seq = iter([(0, 18), (2 * 10 ** 18, 18)])
@@ -549,6 +569,12 @@ class RpcFallback(Base):
         super().setUp()
         self.patch(config, "BASE_RPCS", ["https://a", "https://b", "https://c"])
         evm_dex._rpc_idx = 0
+
+    def test_jsonrpc_level_rate_limits_count_as_throttles(self):
+        for msg in ("Web3RPCError: {'code': -32005, 'message': 'rate limit exceeded'}",
+                    "limit exceeded", "429 Too Many Requests"):
+            self.assertTrue(evm_dex._throttled(RuntimeError(msg)), msg)
+        self.assertFalse(evm_dex._throttled(RuntimeError("execution reverted")))
 
     def test_a_throttled_read_rotates_and_succeeds(self):
         calls = []
