@@ -412,7 +412,9 @@ def execute_sell(asset_id, reason, fraction=1.0):
     cost_part = pos["cost_basis_usd"] * sold_share
     pnl = proceeds - cost_part
     if sold_share >= 0.999:
-        if config.WHITELIST_REAPPROVE_AFTER_LOSS and pnl < 0:
+        # -$0.000001 from fee rounding is not a loss. The first Solana round
+        # trip withdrew an approval over "exited at a loss ($-0.00)".
+        if config.WHITELIST_REAPPROVE_AFTER_LOSS and pnl < -config.LOSS_THRESHOLD_USD:
             state.whitelist_revoke(asset_id)
             journal.log_event("whitelist_ended_on_loss", asset_id, {"pnl": round(pnl, 2)})
             alerts.ops(f"{asset_id} exited at a loss (${pnl:.2f}). Its approval is "

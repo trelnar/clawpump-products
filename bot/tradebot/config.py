@@ -79,6 +79,7 @@ TICKET_MAX_AGE_SEC = 900         # BUY NOW ticket max research age
 WHITELIST_TTL_SEC = 7 * 86400    # an approval authorises this asset for 1 week
 WHITELIST_MAX_REENTRIES = 3      # re-entries per approval before re-asking
 WHITELIST_REAPPROVE_AFTER_LOSS = True   # a losing exit ends the authorisation
+LOSS_THRESHOLD_USD = 0.05        # smaller than this is rounding, not a loss
 APPROVAL_EXPIRY_SEC = 1800       # standard approval expiry
 APPROVAL_EXPIRY_FAST_SEC = 600   # high-velocity approval expiry
 GATE_TIME_BUDGET_SEC = 5
