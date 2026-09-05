@@ -19,8 +19,8 @@ import _env  # noqa: E402
 _env.load("/etc/tradebot/agent.env" if os.path.exists("/etc/tradebot/agent.env")
           else "/etc/tradebot/secrets.env")
 
-from tradebot import signals  # noqa: E402
-from tradebot.signals import store  # noqa: E402
+from tradebot import journal, signals  # noqa: E402
+from tradebot.signals import budget, store  # noqa: E402
 
 
 def main():
@@ -32,6 +32,7 @@ def main():
     bad = 0
     for src in on:
         t0 = time.time()
+        budget.arm(120)          # generous here; the agent uses SIGNAL_SOURCE_BUDGET_SEC
         try:
             n = src.collect()
             print(f"  {src.NAME:10s} ok    +{n:<4d} new events   {time.time() - t0:4.1f}s")
@@ -41,6 +42,30 @@ def main():
         except Exception as e:
             bad += 1
             print(f"  {src.NAME:10s} FAIL  {str(e)[:120]}")
+    budget.clear()
+    print()
+    # Per source and kind, last hour. A kind a source is supposed to produce
+    # sitting at zero on a busy day is the parser-drift symptom to look for:
+    # pumpfun should show launch, graduation AND trending; gecko trending AND
+    # new_pool; reddit post.
+    rows = journal.query(
+        "SELECT source, kind, COUNT(*) n FROM signal_events WHERE ts > ? "
+        "GROUP BY source, kind ORDER BY source, kind", (time.time() - 3600,))
+    if rows:
+        print("events in the last hour, by source and kind:")
+        for r in rows:
+            print(f"  {r['source']:12s} {r['kind']:14s} {r['n']}")
+    expected = {"pumpfun": {"launch", "graduation", "trending"},
+                "gecko": {"trending", "new_pool"}, "reddit": {"post"},
+                "clanker": {"launch"}}
+    got = {}
+    for r in rows:
+        got.setdefault(r["source"], set()).add(r["kind"])
+    for src in on:
+        missing = expected.get(src.NAME, set()) - got.get(src.NAME, set())
+        if missing:
+            print(f"  ! {src.NAME}: no {', '.join(sorted(missing))} events -- "
+                  f"quiet hour, or the parser no longer matches")
     print()
     top = store.rising(limit=8)
     if top:

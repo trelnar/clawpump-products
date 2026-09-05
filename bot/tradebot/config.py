@@ -70,6 +70,7 @@ PAID_PROMO_SOURCES = env("PAID_PROMO_SOURCES", "0") not in ("0", "false", "")
 SIGNAL_CANDIDATES = int(env("SIGNAL_CANDIDATES", "20"))   # rising assets per cycle
 SIGNAL_MIN_LIQUIDITY_USD = float(env("SIGNAL_MIN_LIQUIDITY_USD", "5000"))
 SIGNAL_RETENTION_DAYS = 3
+SIGNAL_SOURCE_BUDGET_SEC = float(env("SIGNAL_SOURCE_BUDGET_SEC", "45"))  # per source per pass
 GECKO_MIN_GAP = float(env("GECKO_MIN_GAP", "6"))
 GECKO_POOLS_PER_LIST = 20
 PUMPFUN_LIMIT = 50
@@ -78,7 +79,7 @@ REDDIT_SUBS = [x.strip() for x in env(
     "REDDIT_SUBS", "CryptoMoonShots,solana,memecoins,SolanaMemeCoins,base").split(",") if x.strip()]
 NEYNAR_API_KEY = env("NEYNAR_API_KEY")
 BIRDEYE_API_KEY = env("BIRDEYE_API_KEY")
-BIRDEYE_MAX_PER_PASS = 15
+BIRDEYE_MAX_PER_PASS = 5
 HOLDER_GROWTH_PCT = 0.10           # +10% holders between passes = an event
 # Telegram monitor (separate service, Telethon user session)
 TG_API_ID = env("TG_API_ID")

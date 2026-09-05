@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import requests
 
 from ... import config, journal
-from .. import extract, store
+from .. import budget, extract, store
 
 NAME = "farcaster"
 KEYLESS = False
@@ -36,10 +36,12 @@ def collect():
     n = 0
     cutoff = time.time() - 6 * 3600
     for q in QUERIES:
+        if budget.expired():
+            break
         try:
             r = requests.get(f"{BASE}/cast/search", params={"q": q, "limit": 50},
                              headers={"x-api-key": config.NEYNAR_API_KEY, "accept": "application/json"},
-                             timeout=15)
+                             timeout=budget.TIMEOUT)
             r.raise_for_status()
             casts = ((r.json().get("result") or {}).get("casts") or [])
         except Exception as e:

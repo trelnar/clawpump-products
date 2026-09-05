@@ -13,8 +13,10 @@ model, per asset, the shape of attention rather than raw counts:
 | `kinds` | which hard events fired: `launch`, `graduation`, `new_pool`, `holder_growth`, `call`… |
 | `first_seen_min` | minutes since the asset first appeared anywhere |
 
-Ranking is `accel × breadth × (2 if a hard event fired)`. The top `SIGNAL_CANDIDATES`
-(20) go to research each cycle, on top of Coinbase movers. Paid promotion is **off**
+Ranking is `accel × breadth^1.5 × (2 if a hard event fired)`, with one rule on top: an
+asset only one source has named is capped below anything two independent sources agree
+on, however loud that one source is. That is the property paid promotion cannot buy. The
+top `SIGNAL_CANDIDATES` (20) go to research each cycle, on top of Coinbase movers. Paid promotion is **off**
 (`PAID_PROMO_SOURCES=0`); set it to `1` to add those feeds back as one more source.
 
 All message text is data. Nothing in this layer interprets it; only contract addresses
@@ -29,11 +31,14 @@ and `$TICKER`s are extracted and stored.
 | `clanker` | new token deploys on Base via Clanker | nothing | on |
 | `reddit` | new posts in `REDDIT_SUBS` (CryptoMoonShots, solana, memecoins, SolanaMemeCoins, base), upvote-weighted | nothing | on |
 | `farcaster` | cast search for addresses/tickers, via Neynar | `NEYNAR_API_KEY` (free tier) | off until keyed |
-| `birdeye` | holder-count growth on assets already seen elsewhere | `BIRDEYE_API_KEY` (free tier) | off until keyed |
+| `birdeye` | holder-count growth on the top 5 rising Solana assets | `BIRDEYE_API_KEY` (free tier) | off until keyed |
 | `telegram` | new messages in `TG_CHANNELS`, as `call` events — separate daemon | `TG_API_ID`, `TG_API_HASH`, `TG_CHANNELS`, one-time login | off until set |
 
-Every source is isolated: one failing logs `signal_source_fail` and the rest run.
-`SIGNAL_SOURCES` (comma list) chooses which are attempted at all.
+Every source is isolated: one failing logs `signal_source_fail` and the rest run. Each
+gets `SIGNAL_SOURCE_BUDGET_SEC` (45s) of wall clock per pass and stops between requests
+once it is spent, so a hanging host costs one request, not the research cycle.
+`SIGNAL_SOURCES` (comma list) chooses which are attempted at all. Base addresses are
+lowercased everywhere an id is formed; one spelling per asset.
 
 ### Not built, and why
 
@@ -81,7 +86,9 @@ sudo systemctl enable --now tradebot-tgmon
 sudo systemctl status tradebot-tgmon
 ```
 
-The service is `User=agent` with the trading secrets marked inaccessible. Good channels
+The service is `User=agent` with the trading secrets marked inaccessible. If it is
+started before the login, it logs `tgmon_not_logged_in` once and exits with code 3,
+which the unit does not restart on; run the login, then `systemctl start` it again. Good channels
 to start with are the large public call channels for Solana and Base memecoins; breadth
 across several independent ones is the signal, so prefer 5–10 channels over one.
 

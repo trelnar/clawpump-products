@@ -12,7 +12,7 @@ import time
 import requests
 
 from ... import config, journal
-from .. import store
+from .. import budget, store
 
 NAME = "birdeye"
 KEYLESS = False
@@ -26,7 +26,7 @@ def enabled():
 def _overview(mint):
     r = requests.get(f"{BASE}/defi/token_overview", params={"address": mint},
                      headers={"X-API-KEY": config.BIRDEYE_API_KEY, "x-chain": "solana",
-                              "accept": "application/json"}, timeout=15)
+                              "accept": "application/json"}, timeout=budget.TIMEOUT)
     r.raise_for_status()
     return (r.json() or {}).get("data") or {}
 
@@ -36,6 +36,8 @@ def collect():
     assets = [r["asset_id"] for r in store.rising(limit=config.BIRDEYE_MAX_PER_PASS)
               if r["asset_id"].startswith("solana:")]
     for asset in assets:
+        if budget.expired():
+            break
         mint = asset.split(":", 1)[1]
         try:
             d = _overview(mint)

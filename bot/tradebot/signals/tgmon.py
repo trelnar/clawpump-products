@@ -22,6 +22,9 @@ from .. import config, journal
 from . import extract, store
 
 NAME = "telegram"
+EXIT_NOT_CONFIGURED = 0
+EXIT_NOT_LOGGED_IN = 3      # RestartPreventExitStatus in the unit: do not loop on this
+RETRY_SEC = 30
 
 
 def enabled():
@@ -29,53 +32,70 @@ def enabled():
 
 
 async def _run():
+    """One connected session. Returns an exit code, or None to reconnect."""
     from telethon import TelegramClient, events
 
     client = TelegramClient(config.TG_SESSION, int(config.TG_API_ID), config.TG_API_HASH)
-    await client.start()          # uses the saved session; never prompts under systemd
-    me = await client.get_me()
-    journal.log_event("tgmon_start", detail={"as": me.username or me.id,
-                                             "channels": len(config.TG_CHANNELS)})
-    chats = []
-    for ch in config.TG_CHANNELS:
+    try:
+        # NOT client.start(): with no saved session that prompts for a phone
+        # number on stdin, which under systemd is /dev/null -> EOFError every
+        # 30s forever while the unit reads "active (running)".
+        await client.connect()
+        if not await client.is_user_authorized():
+            journal.log_event("tgmon_not_logged_in",
+                              detail=f"no session at {config.TG_SESSION}; run scripts/tg_login.py")
+            return EXIT_NOT_LOGGED_IN
+        me = await client.get_me()
+        journal.log_event("tgmon_start", detail={"as": me.username or me.id,
+                                                 "channels": len(config.TG_CHANNELS)})
+        chats = []
+        for ch in config.TG_CHANNELS:
+            try:
+                chats.append(await client.get_entity(ch))
+            except Exception as e:
+                journal.log_event("tgmon_channel_fail", detail=f"{ch}: {str(e)[:80]}")
+        if not chats:
+            journal.log_event("tgmon_no_channels")
+            return None
+
+        @client.on(events.NewMessage(chats=chats))
+        async def on_msg(ev):
+            text = ev.raw_text or ""
+            assets = extract.asset_ids(text)
+            if not assets:
+                return
+            chan = getattr(ev.chat, "username", None) or str(ev.chat_id)
+            for asset in assets:
+                if store.record(f"tg:{chan}", asset, "call",
+                                ref=f"{chan}/{ev.id}", ts=ev.date.timestamp()):
+                    journal.log_discovery(asset, f"telegram_{chan}", {"len": len(text)})
+            store.note_run(NAME, True, len(assets))
+
+        journal.log_event("tgmon_listening",
+                          detail=[getattr(c, "username", None) or c.id for c in chats])
+        await client.run_until_disconnected()
+        return None
+    finally:
         try:
-            chats.append(await client.get_entity(ch))
-        except Exception as e:
-            journal.log_event("tgmon_channel_fail", detail=f"{ch}: {str(e)[:80]}")
-    if not chats:
-        journal.log_event("tgmon_no_channels")
-        return
-
-    @client.on(events.NewMessage(chats=chats))
-    async def on_msg(ev):
-        text = ev.raw_text or ""
-        assets = extract.asset_ids(text)
-        if not assets:
-            return
-        chan = getattr(ev.chat, "username", None) or str(ev.chat_id)
-        for asset in assets:
-            if store.record(f"tg:{chan}", asset, "call",
-                            ref=f"{chan}/{ev.id}", ts=ev.date.timestamp()):
-                journal.log_discovery(asset, f"telegram_{chan}", {"len": len(text)})
-        store.note_run(NAME, True, len(assets))
-
-    journal.log_event("tgmon_listening",
-                      detail=[getattr(c, "username", None) or c.id for c in chats])
-    await client.run_until_disconnected()
+            await client.disconnect()   # never leak a connection per retry
+        except Exception:
+            pass
 
 
 def main():
     if not enabled():
         print("tgmon: TG_API_ID / TG_API_HASH / TG_CHANNELS not set; nothing to do.")
-        return 0
+        return EXIT_NOT_CONFIGURED
     store.init()
     while True:
         try:
-            asyncio.run(_run())
+            code = asyncio.run(_run())
+            if code is not None:
+                return code
         except Exception as e:
             journal.log_event("tgmon_error", detail=str(e)[:200])
             store.note_run(NAME, False, 0, str(e))
-            time.sleep(30)
+        time.sleep(RETRY_SEC)       # a clean return reconnects too, never in a tight loop
 
 
 if __name__ == "__main__":

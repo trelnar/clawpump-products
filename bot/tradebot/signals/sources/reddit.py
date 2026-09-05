@@ -9,7 +9,7 @@ import time
 import requests
 
 from ... import config, journal
-from .. import extract, store
+from .. import budget, extract, store
 
 NAME = "reddit"
 KEYLESS = True
@@ -27,7 +27,7 @@ def _get(sub):
         time.sleep(gap)
     _last[0] = time.time()
     r = requests.get(f"https://www.reddit.com/r/{sub}/new.json",
-                     params={"limit": 50}, headers={"User-Agent": UA}, timeout=15)
+                     params={"limit": 50}, headers={"User-Agent": UA}, timeout=budget.TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -36,6 +36,8 @@ def collect():
     n = 0
     cutoff = time.time() - 6 * 3600
     for sub in config.REDDIT_SUBS:
+        if budget.expired():
+            break
         try:
             posts = ((_get(sub).get("data") or {}).get("children") or [])
         except Exception as e:

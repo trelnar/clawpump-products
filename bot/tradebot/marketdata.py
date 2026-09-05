@@ -203,6 +203,11 @@ def compact_candles(rows, keep=60, digits=8):
 
 
 # --- discovery --------------------------------------------------------------
+def _addr(t):
+    a = t.get("tokenAddress") or ""
+    return a.lower() if t.get("chainId") == "base" else a   # one spelling per Base asset
+
+
 def dexscreener_trending():
     """Boosted/trending token profiles across chains (keyless)."""
     out = []
@@ -210,7 +215,7 @@ def dexscreener_trending():
         j = _get("https://api.dexscreener.com/token-boosts/top/v1")
         for t in j if isinstance(j, list) else []:
             if t.get("chainId") in ("solana", "base"):
-                out.append({"chain": t["chainId"], "address": t.get("tokenAddress"),
+                out.append({"chain": t["chainId"], "address": _addr(t),
                             "source": "dexscreener_boosts", "raw": t})
     except Exception as e:
         journal.log_event("discovery_feed_fail", detail=f"boosts: {e}")
@@ -218,7 +223,7 @@ def dexscreener_trending():
         j = _get("https://api.dexscreener.com/token-profiles/latest/v1")
         for t in j if isinstance(j, list) else []:
             if t.get("chainId") in ("solana", "base"):
-                out.append({"chain": t["chainId"], "address": t.get("tokenAddress"),
+                out.append({"chain": t["chainId"], "address": _addr(t),
                             "source": "dexscreener_profiles", "raw": t})
     except Exception as e:
         journal.log_event("discovery_feed_fail", detail=f"profiles: {e}")

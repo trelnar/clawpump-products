@@ -41,13 +41,21 @@ def gather():
     enriched, seen = [], set()
 
     def add_token(chain, address, source, extra=None):
-        asset = f"{chain}:{address}"
+        asset = state.norm_asset(f"{chain}:{address}")
+        address = asset.split(":", 1)[1]
         if asset in seen or len(enriched) >= config.AGENT_MAX_CANDIDATES:
             return
         if state.rejected_recently(asset) is not None:
             seen.add(asset)      # the NO stands; no research spend on it
             return
-        info = marketdata.dexscreener_token(chain, address)
+        try:
+            info = marketdata.dexscreener_token(chain, address)
+        except Exception as e:
+            # One 429 on one junk candidate must not cost the cycle -- and with
+            # it the HOLD/ADD/SELL reassessment of every held position.
+            journal.log_event("discovery_lookup_fail", asset, str(e)[:120])
+            seen.add(asset)
+            return
         if not info or info["liquidity_usd"] < config.SIGNAL_MIN_LIQUIDITY_USD:
             return
         seen.add(asset)
@@ -231,7 +239,7 @@ def submit(cands):
             "p2x": c.get("p2x"), "p3x": None, "p5x": None, "p10x": None,
             "confidence": c.get("confidence"),
             "size_usd": None, "evidence_state": json.dumps(c)})
-        aid = c["asset_id"]
+        aid = c["asset_id"] = state.norm_asset(c["asset_id"])
         action = c["action"]
         # Track EVERY forecast, PASS included: what the bot declined is where
         # most of the calibration signal is, and observing it costs nothing.

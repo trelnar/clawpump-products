@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import requests
 
 from ... import config, journal
-from .. import store
+from .. import budget, store
 
 NAME = "clanker"
 KEYLESS = True
@@ -30,7 +30,8 @@ def collect():
     n = 0
     now = time.time()
     try:
-        r = requests.get(f"{BASE}/tokens", params={"page": 1, "sort": "desc"}, timeout=15,
+        r = requests.get(f"{BASE}/tokens", params={"page": 1, "sort": "desc"},
+                         timeout=budget.TIMEOUT,
                          headers={"User-Agent": "Mozilla/5.0 tradebot-signals"})
         r.raise_for_status()
         j = r.json()
@@ -41,6 +42,9 @@ def collect():
     for t in toks or []:
         addr = (t.get("contract_address") or "").lower()
         if not addr.startswith("0x"):
+            continue
+        # Clanker deploys on more than Base now; only Base (8453) is tradeable here
+        if t.get("chain_id") not in (None, 8453, "8453"):
             continue
         created = _iso(t.get("created_at"))
         if not created or now - created > 12 * 3600:

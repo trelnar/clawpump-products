@@ -12,17 +12,23 @@ _SOL = re.compile(r"\b([1-9A-HJ-NP-Za-km-z]{32,44})\b")
 _EVM = re.compile(r"\b(0x[a-fA-F0-9]{40})\b")
 _TICKER = re.compile(r"\$([A-Za-z][A-Za-z0-9]{1,9})\b")
 
-# Words that match the base58 pattern but are never mints.
-_NOISE = {"pump", "moon", "solana", "ethereum"}
+# URL paths whose base58 segment is a POOL or PAIR id, not a mint. Recording
+# those as assets filled the rising list with ids DexScreener cannot price.
+# (pump.fun and birdeye token URLs carry the mint itself, so they stay.)
+_POOL_URL = re.compile(
+    r"(?:dexscreener\.com/[a-z0-9]+/|geckoterminal\.com/[a-z0-9]+/pools/|"
+    r"raydium\.io/swap/\?[^ ]*|/pair/|/pool/)([1-9A-HJ-NP-Za-km-z]{32,44})")
 
 
 def addresses(text):
     """-> list of (chain, address). Solana first, then EVM."""
     out = []
     seen = set()
-    for m in _SOL.finditer(text or ""):
+    text = text or ""
+    pools = {m.group(1) for m in _POOL_URL.finditer(text)}
+    for m in _SOL.finditer(text):
         a = m.group(1)
-        if a.lower() in _NOISE or a in seen or a.isdigit():
+        if a in pools or a in seen or a.isdigit():
             continue
         # base58 has no 0, O, I, l -- a token with those is not a mint
         if any(c in a for c in "0OIl"):
@@ -30,7 +36,7 @@ def addresses(text):
         seen.add(a)
         out.append(("solana", a))
     for m in _EVM.finditer(text or ""):
-        a = m.group(1).lower()
+        a = m.group(1).lower()   # the bot keys EVM assets lowercase everywhere
         if a not in seen:
             seen.add(a)
             out.append(("base", a))   # EVM addr: assume Base until a chain hint says otherwise

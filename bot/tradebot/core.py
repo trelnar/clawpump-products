@@ -63,8 +63,10 @@ def signals_text(asset=None):
         return "\n".join(lines) if top else signals.health_text() + "\nnothing rising yet"
     f = signals.features(asset)
     rows = signals.store.dump(asset, 12)
+    if f["first_seen_min"] is None:
+        return f"{asset}: no signals recorded"
     lines = [f"{asset}: accel {f['accel']} breadth {f['breadth']} first seen "
-             f"{f['first_seen_min']}m ago via {f['first_source']}"]
+             f"{f['first_seen_min']:.0f}m ago via {f['first_source']}"]
     lines += [f"  {r['t'][11:]} {r['source']:12s} {r['kind']:12s} {r['ref'] or ''}" for r in rows]
     return "\n".join(lines)
 
@@ -158,6 +160,8 @@ def supervise_agent():
 
 def main():
     state.init()
+    from .signals import store as _sigstore
+    _sigstore.init()    # SIGNALS in Telegram must answer before the agent's first pass
     # kv is durable: a stale marker must not let the watchdog lift the
     # cold-start SELL_ONLY that state.init() sets pending reconciliation.
     state.set_kv("halt_source", "")

@@ -61,7 +61,13 @@ def record(source, asset_id, kind, ref=None, weight=None, ts=None):
             "VALUES (?,?,?,?,?,?,?)", (ts, source, asset_id, kind, w, ref, key))
         new = cur.rowcount > 0
         if new:
-            c.execute("INSERT OR IGNORE INTO signal_first_seen (asset_id, ts, source) VALUES (?,?,?)",
+            # Sources backdate events (a Reddit post's created_utc, a launch's
+            # timestamp), so the earliest EVENT is first-seen, not the first
+            # insert -- otherwise gecko@now landing before reddit@now-5h told
+            # the model attention began 0 minutes ago.
+            c.execute("INSERT INTO signal_first_seen (asset_id, ts, source) VALUES (?,?,?) "
+                      "ON CONFLICT(asset_id) DO UPDATE SET ts=excluded.ts, source=excluded.source "
+                      "WHERE excluded.ts < signal_first_seen.ts",
                       (asset_id, ts, source))
         c.commit()
     return new
@@ -134,20 +140,53 @@ def rising(limit=40, now=None, min_events=1):
     scored = []
     for r in rows:
         f = features(r["asset_id"], now)
-        hard = 2.0 if any(k in f["kinds"] for k in ("graduation", "launch", "new_pool")) else 1.0
-        score = f["accel"] * max(f["breadth"], 1) * hard
-        scored.append((score, r["asset_id"], f))
+        scored.append((score_of(f), r["asset_id"], f))
     scored.sort(key=lambda t: t[0], reverse=True)
     return [{"asset_id": a, "score": round(s, 2), **f} for s, a, f in scored[:limit]]
 
 
+def score_of(f):
+    """Ranking. Breadth is the thing paid promotion cannot buy, so it is
+    super-linear, and a single source -- however loud -- is capped: with a
+    plain accel x breadth product every brand-new one-source asset (the
+    fresh-asset floor makes accel = 2 x weight) outranked an asset three
+    independent channels had been calling for hours."""
+    hard = any(k in f["kinds"] for k in HARD_KINDS)
+    accel = min(f["accel"], 10.0)
+    breadth = max(f["breadth"], 1)
+    score = accel * (breadth ** 1.5) * (2.0 if hard else 1.0)
+    if breadth <= 1:
+        score = min(score, SINGLE_SOURCE_CAP_HARD if hard else SINGLE_SOURCE_CAP)
+    return round(score, 2)
+
+
+HARD_KINDS = ("graduation", "launch", "new_pool")
+# A steady (accel 1) two-source asset scores 2^1.5 = 2.83. The caps sit just
+# under that: one source, however loud, ranks below anything two independent
+# sources agree on that is not already fading, and a hard on-chain event only
+# lifts it within the single-source tier.
+SINGLE_SOURCE_CAP = 2.0
+SINGLE_SOURCE_CAP_HARD = 2.5
+
+
 def prune(max_age_days=None):
-    """Signals are only useful fresh. Keep the store small."""
+    """Signals are only useful fresh. Keep the store small. first_seen rows
+    for assets with no events left go too, or the table grows by every
+    pump.fun launch ever seen."""
     days = max_age_days or config.SIGNAL_RETENTION_DAYS
     with journal._lock:
-        journal.conn().execute("DELETE FROM signal_events WHERE ts < ?",
-                               (time.time() - days * 86400,))
-        journal.conn().commit()
+        c = journal.conn()
+        c.execute("DELETE FROM signal_events WHERE ts < ?", (time.time() - days * 86400,))
+        c.execute("DELETE FROM signal_first_seen WHERE asset_id NOT IN "
+                  "(SELECT DISTINCT asset_id FROM signal_events)")
+        c.commit()
+
+
+def event_count(asset_id=None):
+    if asset_id:
+        return journal.query("SELECT COUNT(*) n FROM signal_events WHERE asset_id=?",
+                             (asset_id,))[0]["n"]
+    return journal.query("SELECT COUNT(*) n FROM signal_events")[0]["n"]
 
 
 def dump(asset_id, limit=20):

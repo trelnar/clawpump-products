@@ -12,7 +12,7 @@ of them: acceleration, breadth, first-seen age, and which hard events fired.
 import time
 
 from .. import config, journal
-from . import store
+from . import budget, store
 from .sources import birdeye, clanker, farcaster, gecko, pumpfun, reddit
 
 SOURCES = [gecko, pumpfun, clanker, reddit, farcaster, birdeye]
@@ -28,6 +28,7 @@ def collect_all():
     out = {}
     for src in enabled_sources():
         t0 = time.time()
+        budget.arm(config.SIGNAL_SOURCE_BUDGET_SEC)
         try:
             n = src.collect()
             store.note_run(src.NAME, True, n)
@@ -37,7 +38,9 @@ def collect_all():
             journal.log_event("signal_source_fail", detail=f"{src.NAME}: {str(e)[:120]}")
             out[src.NAME] = None
         journal.log_event("signal_collect", detail={"source": src.NAME, "new": out[src.NAME],
-                                                    "sec": round(time.time() - t0, 1)})
+                                                    "sec": round(time.time() - t0, 1),
+                                                    "cut": budget.expired()})
+    budget.clear()
     store.prune()
     return out
 

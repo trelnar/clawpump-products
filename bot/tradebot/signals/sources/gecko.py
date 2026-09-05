@@ -9,7 +9,7 @@ import time
 import requests
 
 from ... import config, journal
-from .. import store
+from .. import budget, store
 
 NAME = "gecko"
 KEYLESS = True
@@ -28,7 +28,7 @@ def _get(path):
         time.sleep(gap)
     _last[0] = time.time()
     r = requests.get(f"{BASE}{path}", headers={"Accept": "application/json;version=20230302"},
-                     timeout=15)
+                     timeout=budget.TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -46,6 +46,8 @@ def collect():
     for chain, net in NETWORKS.items():
         for kind, path in (("trending", f"/networks/{net}/trending_pools"),
                            ("new_pool", f"/networks/{net}/new_pools")):
+            if budget.expired():
+                return n
             try:
                 pools = (_get(path).get("data") or [])[:config.GECKO_POOLS_PER_LIST]
             except Exception as e:

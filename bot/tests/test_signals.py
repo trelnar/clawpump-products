@@ -53,6 +53,19 @@ class Extract(Base):
     def test_asset_ids_form(self):
         self.assertEqual(extract.asset_ids(EVM), [f"base:{EVM}"])
 
+    def test_evm_addresses_are_lowercased(self):
+        mixed = "0xAbCdEf" + "1" * 34
+        self.assertEqual(extract.asset_ids(mixed), [f"base:{mixed.lower()}"])
+
+    def test_pool_ids_in_chart_urls_are_not_assets(self):
+        pair = "8" * 40
+        text = (f"chart https://dexscreener.com/solana/{pair} for {SOL_MINT} "
+                f"and https://www.geckoterminal.com/solana/pools/{SOL_MINT2}")
+        self.assertEqual(extract.addresses(text), [("solana", SOL_MINT)])
+        # a pump.fun link carries the mint itself, so it counts
+        self.assertEqual(extract.addresses(f"https://pump.fun/{SOL_MINT2}"),
+                         [("solana", SOL_MINT2)])
+
 
 class Store(Base):
     def test_record_is_idempotent_on_ref(self):
@@ -65,8 +78,10 @@ class Store(Base):
     def test_first_seen_is_the_earliest_event(self):
         a = f"solana:{SOL_MINT}"
         now = time.time()
-        store.record("gecko", a, "trending", ref="p1", ts=now - 1000)
+        # the NEWER event lands first: gecko reports at poll time, reddit
+        # backdates to created_utc. First-seen must still be the earliest.
         store.record("reddit", a, "post", ref="r1", ts=now - 10)
+        store.record("gecko", a, "trending", ref="p1", ts=now - 1000)
         f = store.features(a, now)
         self.assertAlmostEqual(f["first_seen_min"], 1000 / 60, places=1)
         self.assertEqual(f["first_source"], "gecko")
@@ -105,12 +120,37 @@ class Store(Base):
         self.assertEqual(top[0]["asset_id"], broad)
         self.assertIn("graduation", top[0]["kinds"])
 
+    def test_one_source_never_outranks_sustained_multi_source_calls(self):
+        """A brand-new single-source asset used to score accel x1 x hard = 10
+        against 3.0 for an asset three channels had called hourly for 7h."""
+        now = time.time()
+        fresh = f"solana:{SOL_MINT}"
+        called = f"solana:{SOL_MINT2}"
+        store.record("pumpfun", fresh, "launch", ref="f1", ts=now - 60)
+        store.record("pumpfun", fresh, "trending", ref="koth:f1", ts=now - 60)
+        for h in range(7):
+            for ch in ("tg:a", "tg:b", "tg:c"):
+                store.record(ch, called, "call", ref=f"{ch}/{h}", ts=now - h * 3600 - 30)
+        top = store.rising(limit=2, now=now)
+        self.assertEqual(top[0]["asset_id"], called)
+        self.assertLessEqual(top[1]["score"], store.SINGLE_SOURCE_CAP_HARD)
+        loud = f"solana:{'3' * 32}"
+        store.record("reddit", loud, "post", ref="big", weight=4.0, ts=now - 60)
+        self.assertLessEqual(store.features(loud, now) and
+                             store.score_of(store.features(loud, now)), store.SINGLE_SOURCE_CAP)
+
     def test_prune_drops_old_events(self):
         a = f"solana:{SOL_MINT}"
         store.record("x", a, "mention", ref="old", ts=time.time() - 10 * 86400)
         store.record("x", a, "mention", ref="new")
+        gone = f"solana:{SOL_MINT2}"
+        store.record("x", gone, "mention", ref="old2", ts=time.time() - 10 * 86400)
+        self.assertEqual(store.event_count(a), 2)
         store.prune(max_age_days=3)
-        self.assertEqual(store.features(a)["events_6h"], 1)
+        self.assertEqual(store.event_count(a), 1)
+        self.assertEqual(store.event_count(gone), 0)
+        self.assertIsNone(store.features(gone)["first_seen_min"])   # first_seen pruned too
+        self.assertIsNotNone(store.features(a)["first_seen_min"])
 
 
 class GeckoParser(Base):
@@ -250,3 +290,111 @@ class Discovery(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AssetIdSpelling(Base):
+    def test_norm_asset_lowercases_base_only(self):
+        from tradebot import state
+        self.assertEqual(state.norm_asset("base:0xABC"), "base:0xabc")
+        self.assertEqual(state.norm_asset(f"solana:{SOL_MINT}"), f"solana:{SOL_MINT}")
+        self.assertEqual(state.norm_asset("cex:BTC-USDC"), "cex:BTC-USDC")
+        self.assertIsNone(state.norm_asset(None))
+
+    def test_migration_rewrites_checksum_ids(self):
+        from tradebot import state
+        mixed = "base:0xAbCdEf" + "1" * 34
+        state.upsert_position(mixed, "base", "base", 1.0, 5.0)
+        state.whitelist_add(mixed, "base")
+        state._migrate()
+        self.assertIsNone(state.get_position(mixed))
+        self.assertIsNotNone(state.get_position(mixed.lower()))
+        self.assertTrue(state.is_whitelisted(mixed.lower()))
+        state.close_position(mixed.lower())
+
+    def test_discovery_dedupes_across_case(self):
+        from tradebot import config, marketdata, signals, state
+        from tradebot.agent import runner
+        mixed = "0xAbCdEf" + "1" * 34
+        self.patch(signals, "collect_all", lambda: {})
+        self.patch(signals, "candidates", lambda: [
+            {"asset_id": f"base:{mixed}", "score": 5.0},
+            {"asset_id": f"base:{mixed.lower()}", "score": 4.0}])
+        self.patch(signals, "features", lambda a: {})
+        looked = []
+
+        def dex(chain, addr):
+            looked.append(addr)
+            return {"price": 1.0, "liquidity_usd": 1e6, "volume_h24": 1e5,
+                    "base_symbol": "X", "created_ms": 0, "pair_address": "p"}
+        self.patch(marketdata, "dexscreener_token", dex)
+        self.patch(marketdata, "ohlcv_dex", lambda *a, **k: [])
+        self.patch(marketdata, "coinbase_movers", lambda: [])
+        self.patch(config, "PAID_PROMO_SOURCES", False)
+        out = runner.gather()
+        self.assertEqual(looked, [mixed.lower()])
+        self.assertEqual(len(out), 1)
+
+    def test_one_lookup_failure_does_not_abort_discovery(self):
+        from tradebot import config, marketdata, signals
+        from tradebot.agent import runner
+        self.patch(signals, "collect_all", lambda: {})
+        self.patch(signals, "candidates", lambda: [
+            {"asset_id": f"solana:{SOL_MINT}", "score": 5.0},
+            {"asset_id": f"solana:{SOL_MINT2}", "score": 4.0}])
+        self.patch(signals, "features", lambda a: {})
+
+        def dex(chain, addr):
+            if addr == SOL_MINT:
+                raise RuntimeError("429 Too Many Requests")
+            return {"price": 1.0, "liquidity_usd": 1e6, "volume_h24": 1e5,
+                    "base_symbol": "X", "created_ms": 0, "pair_address": "p"}
+        self.patch(marketdata, "dexscreener_token", dex)
+        self.patch(marketdata, "ohlcv_dex", lambda *a, **k: [])
+        self.patch(marketdata, "coinbase_movers", lambda: [])
+        self.patch(config, "PAID_PROMO_SOURCES", False)
+        out = runner.gather()
+        self.assertEqual([c["address"] for c in out], [SOL_MINT2])
+
+
+class Budget(Base):
+    def test_sources_stop_at_the_deadline(self):
+        from tradebot.signals import budget, sources
+        calls = []
+
+        def get(sub):
+            calls.append(sub)
+            budget.arm(-1)          # the first request uses up the budget
+            return {"data": {"children": []}}
+        self.patch(sources.reddit, "_get", get)
+        self.patch(sources.reddit, "_last", [time.time() - 100])
+        budget.arm(60)
+        try:
+            sources.reddit.collect()
+        finally:
+            budget.clear()
+        self.assertEqual(len(calls), 1)
+
+    def test_signals_text_before_any_signal(self):
+        from tradebot import core
+        self.assertIn("no signals recorded", core.signals_text("solana:nothing"))
+
+
+class TgMon(Base):
+    def test_not_logged_in_exits_with_the_no_restart_code(self):
+        try:
+            import telethon  # noqa: F401
+        except ImportError:
+            self.skipTest("telethon not installed")
+        import asyncio
+        from tradebot import config
+        from tradebot.signals import tgmon
+
+        class FakeClient:
+            def __init__(self, *a, **k): self.disconnected = False
+            async def connect(self): pass
+            async def is_user_authorized(self): return False
+            async def disconnect(self): self.disconnected = True
+        import telethon as _t
+        self.patch(_t, "TelegramClient", FakeClient)
+        self.patch(config, "TG_API_ID", "1"); self.patch(config, "TG_API_HASH", "h")
+        self.assertEqual(asyncio.run(tgmon._run()), tgmon.EXIT_NOT_LOGGED_IN)

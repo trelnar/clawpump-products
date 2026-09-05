@@ -33,6 +33,19 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
 """
 
 
+def norm_asset(asset_id):
+    """One spelling per asset. EVM addresses are case-insensitive but every
+    lookup here is an exact match: a token held as base:0xAbC.. and proposed
+    again as base:0xabc.. was neither deduped nor recognised as held,
+    whitelisted or rejected. Lowercase at every boundary an id crosses."""
+    if not asset_id:
+        return asset_id
+    kind, sep, ident = asset_id.partition(":")
+    if kind == "base" and ident.startswith(("0x", "0X")):
+        return f"base:{ident.lower()}"
+    return asset_id
+
+
 def _migrate():
     """Additive column migrations. The DB outlives any single deploy."""
     for table, col, decl in (("tickets", "plan", "TEXT"),
@@ -43,6 +56,13 @@ def _migrate():
                 journal.conn().execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
                 journal.conn().commit()
             journal.log_event("schema_migrate", detail=f"{table}.{col}")
+    # Base ids written before norm_asset existed may carry checksum case.
+    with journal._lock:
+        c = journal.conn()
+        for table in ("positions", "whitelist", "tickets", "pending_approvals"):
+            c.execute(f"UPDATE OR IGNORE {table} SET asset_id=lower(asset_id) "
+                      "WHERE asset_id LIKE 'base:0x%' AND asset_id != lower(asset_id)")
+        c.commit()
 
 
 def init():
