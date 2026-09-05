@@ -50,7 +50,10 @@ chown root:bot "$SECRETS"; chmod 640 "$SECRETS"
 for f in /etc/tradebot/solana_wallet.json /etc/tradebot/evm_wallet.key; do
   [[ -e "$f" ]] && { chown bot:bot "$f"; chmod 600 "$f"; }
 done
-chmod 750 /etc/tradebot; chown root:bot /etc/tradebot
+# o+x only: lets agent TRAVERSE the directory to reach agent.env. It cannot
+# list it, and every other file keeps its own tighter mode. 750 blocked the
+# agent from its own env file.
+chmod 751 /etc/tradebot; chown root:bot /etc/tradebot
 
 # 5. the shared database: both users reach it through tbdata
 chown -R bot:tbdata "$DATA"
