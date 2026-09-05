@@ -75,6 +75,9 @@ class Commands:
             alerts.ops(f"Revoked {arg}. It will require approval again.")
         elif cmd == "STATUS" and not arg:
             alerts.ops(self.status_text())
+        elif cmd == "SIGNALS":
+            alerts.ops(self.signals_text(arg) if hasattr(self, "signals_text")
+                       else "Signal report unavailable.")
         elif cmd == "GAPS":
             alerts.ops(self.gaps_text(arg) if hasattr(self, "gaps_text")
                        else "Gap report unavailable.")

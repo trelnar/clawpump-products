@@ -52,6 +52,23 @@ def gaps_text(arg=None):
     return calibration.gaps(days)
 
 
+def signals_text(asset=None):
+    from . import signals
+    if not asset:
+        top = signals.candidates(8)
+        lines = [signals.health_text(), "", "rising (accel x breadth):"]
+        for r in top:
+            lines.append(f"  {r['score']:5.1f} {r['asset_id'][:40]} a{r['accel']} "
+                         f"b{r['breadth']} {','.join(r['kinds'])}")
+        return "\n".join(lines) if top else signals.health_text() + "\nnothing rising yet"
+    f = signals.features(asset)
+    rows = signals.store.dump(asset, 12)
+    lines = [f"{asset}: accel {f['accel']} breadth {f['breadth']} first seen "
+             f"{f['first_seen_min']}m ago via {f['first_source']}"]
+    lines += [f"  {r['t'][11:]} {r['source']:12s} {r['kind']:12s} {r['ref'] or ''}" for r in rows]
+    return "\n".join(lines)
+
+
 def why_text(asset):
     r = journal.query(
         "SELECT evidence_state FROM forecasts WHERE asset_id LIKE ? ORDER BY ts DESC LIMIT 1",
@@ -149,6 +166,7 @@ def main():
                              status_text, report_text, why_text)
     cmds.score_text = score_text
     cmds.gaps_text = gaps_text
+    cmds.signals_text = signals_text
     alerts.bind_sender(telegram.send)
     holder = {"p": telegram.Poller(cmds.handle)}
     holder["p"].start()

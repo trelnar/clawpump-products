@@ -41,7 +41,7 @@ usermod -aG tbdata bot
 umask 077
 {
   echo "# Research layer only. Nothing here can move money."
-  grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_WORKSPACE_ID|ANTHROPIC_MODEL|AGENT_|DISCOVERY_INTERVAL_SEC|TRADEBOT_DB|SOLANA_RPC|BASE_RPC|TRADEBOT_LOG_STDOUT)=' "$SECRETS" || true
+  grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_WORKSPACE_ID|ANTHROPIC_MODEL|AGENT_|DISCOVERY_INTERVAL_SEC|TRADEBOT_DB|SOLANA_RPC|BASE_RPC|TRADEBOT_LOG_STDOUT|SIGNAL_|PAID_PROMO|REDDIT_|NEYNAR_API_KEY|BIRDEYE_API_KEY|TG_|GECKO_|PUMPFUN_)=' "$SECRETS" || true
 } > "$AGENT_ENV"
 chown root:agent "$AGENT_ENV"; chmod 640 "$AGENT_ENV"
 
@@ -77,7 +77,7 @@ sudo -u agent test -w "$DATA" && echo "ok    agent can write the database" || ec
 #    group, tbdata supplementary) sat uninstalled while the old one kept
 #    running as before.
 cp /opt/tradebot/systemd/tradebot-core.service /opt/tradebot/systemd/tradebot-agent.service \
-   /etc/systemd/system/
+   /opt/tradebot/systemd/tradebot-tgmon.service /etc/systemd/system/
 systemctl daemon-reload
 echo "units     : installed and reloaded"
 echo "agent runs: $(systemctl show -p User -p Group --value tradebot-agent | paste -sd/)  (want agent/agent)"

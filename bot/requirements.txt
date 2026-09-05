@@ -5,3 +5,4 @@ solders>=0.21
 base58>=2.1
 eth-account>=0.13
 web3>=7.6
+telethon>=1.36

@@ -25,7 +25,8 @@ Two services on one VPS (`runtime` skill — the agent decides, the core enforce
 | Service | Role | Model calls? |
 |---|---|---|
 | `tradebot-core` | Telegram approval gate, risk limits, execution, position monitoring, state, heartbeat | No |
-| `tradebot-agent` | Discovery → research via Claude API → tickets | Yes, every 15 min |
+| `tradebot-agent` | Signals → discovery → research via Claude API → tickets | Yes, every 15 min |
+| `tradebot-tgmon` | Telegram channel monitor feeding the signal layer (off until configured, `SIGNALS.md`) | No |
 
 Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
 18 skills in `.agents/skills/` specify intent; `bot/tradebot/` implements it (partially — see §4).
@@ -129,7 +130,7 @@ are systematically optimistic for exactly the tokens this bot hunts.
 | **Observability** | Zero stdout logging; `journalctl` is empty and every diagnostic is trapped in SQLite. The dead-man's switch pings *before* doing the work, so it stays green through a total core failure. The agent layer has no alert path at all — the Anthropic key expiring in 30 days would be silent. |
 | **Security** | Both wallets blind-sign transactions built by third-party aggregators (no router allowlist, no simulation). The research service is handed every credential. Telegram token gets written into the journal on transport errors. |
 | **Unimplemented skills** | `backtest-replay`, calibration, `capital-allocation`, `equities-constraints` are prose only. Every decision-logic change goes straight to live money. |
-| **Strategy inputs** | Discovery is two *paid-promotion* endpoints plus an alphabetical slice of 80/700 Coinbase products — it structurally selects for late, advertised tokens. DexScreener fields already fetched are discarded before the prompt. Only 3 of 18 skills reach the model. |
+| ~~**Strategy inputs**~~ | *Fixed 2026-09-05.* Discovery was two *paid-promotion* endpoints plus an alphabetical slice of Coinbase products. It is now the signal layer (`SIGNALS.md`): launches, graduations, new pools, Reddit, Farcaster, holder growth, Telegram calls — ranked by acceleration × breadth. Paid promotion is off by default. **Unverified live**: the sandbox could not reach any source, so parsers are fixture-tested only — run `scripts/signals_probe.py` after deploying. Still open: only 3 of 18 skills reach the model. |
 | **Correctness traps** | `REVOKE` can never match a token asset (and reports success). Approval codes use a hex alphabet the spec excludes. Rejected assets re-propose within 15 minutes. A DexScreener response missing `priceUsd` yields 0.0, which reads as an invalidation cross and liquidates the position. |
 
 ### 3d. Areas to explore (beyond fixing)
@@ -188,6 +189,15 @@ Until this is run, `tradebot-agent` will fail to start (its unit points at a fil
 does not exist yet) — that ordering is deliberate: fail loudly rather than quietly keep
 handing trading credentials to the process that ingests untrusted content.
 
+**Deploying the signal layer** (once, after pulling it): it adds a dependency and a unit.
+```
+cd /opt/tradebot && git pull && venv/bin/pip install -q -r bot/requirements.txt
+bash scripts/split-credentials.sh && systemctl daemon-reload && systemctl restart tradebot-core tradebot-agent
+venv/bin/python scripts/signals_probe.py
+```
+The probe is the first live contact any source has had; a source printing zero on a
+busy day means its parser needs fixing. Keys and the Telegram monitor: `SIGNALS.md`.
+
 **On the VPS** (`ssh -i ~/.ssh/tradebot_ed25519 root@107.191.39.195`):
 ```
 systemctl status tradebot-core tradebot-agent
@@ -203,7 +213,7 @@ QuickNode for Base, Helius for Solana — put first in `BASE_RPC` / `SOLANA_RPC`
 `secrets.env`. Do this before phase 2.
 
 **Tests**: `cd bot && python3 -m unittest discover -s tests` — no network, no credentials,
-runs anywhere. 78 tests; 8 skip where the Coinbase SDK is absent, so run it on the VPS too.
+runs anywhere. 133 tests; 8 skip where the Coinbase SDK is absent, so run it on the VPS too.
 `test_contracts.py` checks the code against the *installed SDK* rather than against mocks —
 that is the class of check that would have caught the 2026-09-02 Coinbase critical, which
 33 green mock-based tests missed. Add a case for every fix that touches the order path.

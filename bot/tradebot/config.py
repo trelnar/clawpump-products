@@ -58,6 +58,34 @@ BASE_RPC = BASE_RPCS[0]
 
 LOG_STDOUT = env("TRADEBOT_LOG_STDOUT", "1") not in ("0", "false", "")
 
+# --- signal sources (signals package) ---------------------------------------
+# Where attention is measured. Keyless: gecko, pumpfun, clanker, reddit.
+# Need a free key in agent.env: farcaster (NEYNAR_API_KEY), birdeye
+# (BIRDEYE_API_KEY). Telegram monitoring is its own service (tgmon).
+SIGNAL_SOURCES = [x.strip() for x in env(
+    "SIGNAL_SOURCES", "gecko,pumpfun,clanker,reddit,farcaster,birdeye").split(",") if x.strip()]
+# Paid-promotion feeds (DexScreener boosts/profiles). Off: they select for
+# tokens someone paid to show, which is late by construction.
+PAID_PROMO_SOURCES = env("PAID_PROMO_SOURCES", "0") not in ("0", "false", "")
+SIGNAL_CANDIDATES = int(env("SIGNAL_CANDIDATES", "20"))   # rising assets per cycle
+SIGNAL_MIN_LIQUIDITY_USD = float(env("SIGNAL_MIN_LIQUIDITY_USD", "5000"))
+SIGNAL_RETENTION_DAYS = 3
+GECKO_MIN_GAP = float(env("GECKO_MIN_GAP", "6"))
+GECKO_POOLS_PER_LIST = 20
+PUMPFUN_LIMIT = 50
+PUMPFUN_MIN_MCAP_USD = float(env("PUMPFUN_MIN_MCAP_USD", "15000"))
+REDDIT_SUBS = [x.strip() for x in env(
+    "REDDIT_SUBS", "CryptoMoonShots,solana,memecoins,SolanaMemeCoins,base").split(",") if x.strip()]
+NEYNAR_API_KEY = env("NEYNAR_API_KEY")
+BIRDEYE_API_KEY = env("BIRDEYE_API_KEY")
+BIRDEYE_MAX_PER_PASS = 15
+HOLDER_GROWTH_PCT = 0.10           # +10% holders between passes = an event
+# Telegram monitor (separate service, Telethon user session)
+TG_API_ID = env("TG_API_ID")
+TG_API_HASH = env("TG_API_HASH")
+TG_SESSION = env("TG_SESSION", "/var/lib/tradebot/tgmon.session")
+TG_CHANNELS = [x.strip() for x in env("TG_CHANNELS", "").split(",") if x.strip()]
+
 # --- paths ------------------------------------------------------------------
 DB_PATH = env("TRADEBOT_DB", "/var/lib/tradebot/tradebot.db")
 

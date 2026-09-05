@@ -1,0 +1,23 @@
+[Unit]
+Description=Trading bot Telegram signal monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+SupplementaryGroups=tbdata
+EnvironmentFile=/etc/tradebot/agent.env
+WorkingDirectory=/opt/tradebot/bot
+ExecStart=/opt/tradebot/venv/bin/python -m tradebot.signals.tgmon
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tradebot
+InaccessiblePaths=/etc/tradebot/secrets.env /etc/tradebot/solana_wallet.json /etc/tradebot/evm_wallet.key
+
+[Install]
+WantedBy=multi-user.target
