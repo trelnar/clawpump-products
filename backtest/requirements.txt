@@ -1,0 +1,14 @@
+# BTC 4h backtest harness.
+# Tested with numpy 2.4.6 / pandas 3.0.5 on Python 3.11.
+numpy>=1.26
+pandas>=2.1
+
+# Live Coinbase fetch. Import-guarded in data.py, so the synthetic and fixture
+# paths run without it — but `verify fetch` on the VPS needs it.
+requests>=2.31
+
+# Parquet engine for the on-disk 1h/4h cache.
+pyarrow>=14.0
+
+# Test suite.
+pytest>=7.4
