@@ -93,6 +93,33 @@ def scorecard(days=30):
     return "\n".join(out)
 
 
+def feedback(days=14):
+    """The model's own recent record, per action, in the form it can act on:
+    what it said (mean stated p2x) against what happened (share that reached
+    2x). The first scorecard showed PASSes reaching 2x 31% of the time while
+    the stated p2x on them averaged 0.05 -- a model six times too pessimistic
+    about the very things it was seeing. Nothing was telling it. This does."""
+    since = time.time() - days * 86400
+    rows = journal.query(
+        "SELECT t.action a, COUNT(*) n, AVG(f.p2x) stated, AVG(o.hit_2x) hit2, "
+        "AVG(o.hit_3x) hit3, AVG(o.max_multiple) peak "
+        "FROM outcomes o JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
+        "JOIN forecasts f ON f.forecast_id=o.forecast_id "
+        "WHERE o.ts > ? GROUP BY t.action", (since,))
+    out = {}
+    for r in rows:
+        if not r["n"]:
+            continue
+        out[r["a"] or "?"] = {
+            "resolved": r["n"],
+            "stated_p2x_mean": round(r["stated"] or 0, 3),
+            "reached_2x_share": round(r["hit2"] or 0, 3),
+            "reached_3x_share": round(r["hit3"] or 0, 3),
+            "peak_multiple_mean": round(r["peak"] or 0, 2),
+        }
+    return out
+
+
 def gaps(days=7):
     """Why the bot is not trading. Separates 'nothing qualified' from 'I could
     not tell' -- a cycle of silent PASSes looks identical to blindness until

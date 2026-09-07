@@ -820,6 +820,27 @@ class Calibration(Base):
         self.assertEqual(row["hit_2x"], 1)
         self.assertEqual(row["hit_5x"], 0)
 
+    def test_feedback_pairs_stated_p2x_with_what_happened(self):
+        from tradebot import journal
+        with journal._lock:                     # sibling tests share the DB
+            journal.conn().execute("DELETE FROM outcomes")
+            journal.conn().execute("DELETE FROM forecast_tracking")
+            journal.conn().commit()
+        for i, (p2x, peak) in enumerate([(0.05, 2.5), (0.05, 1.1), (0.1, 3.2), (0.0, 0.8)]):
+            fid = journal.log_forecast({"asset_id": f"solana:FB{i}", "action": "PASS",
+                                        "p2x": p2x})
+            calibration.open_tracking(fid, f"solana:FB{i}", "PASS", 1.0)
+            self.patch(calibration.marketdata, "marks",
+                       lambda a, px=peak, i=i: ({f"solana:FB{i}": px}, True))
+            calibration.tick()
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 0)
+        calibration.tick()
+        fb = calibration.feedback()["PASS"]
+        self.assertEqual(fb["resolved"], 4)
+        self.assertAlmostEqual(fb["stated_p2x_mean"], 0.05)
+        self.assertAlmostEqual(fb["reached_2x_share"], 0.5)
+        self.assertAlmostEqual(fb["reached_3x_share"], 0.25)
+
     def test_a_zero_start_price_is_not_tracked(self):
         from tradebot import journal
         fid = journal.log_forecast({"asset_id": "solana:CAL2", "action": "PASS"})

@@ -155,6 +155,7 @@ def research(candidates):
         "now_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "held_positions": held_context(),
         "go_live_phase": state.phase(),
+        "your_recent_calibration": calibration.feedback(),
         "untrusted_market_data": candidates,
     }
     resp = _call(
@@ -178,6 +179,15 @@ def research(candidates):
                    "did not give you and that would have changed your answer. A cycle of "
                    "silent PASSes is indistinguishable from blindness; those two are "
                    "what make the difference visible.\n\n"
+                   "`your_recent_calibration` is YOUR OWN record over the last two weeks, "
+                   "per action: the mean p2x you stated against the share that actually "
+                   "reached 2x within the 72h window (peak, sampled every 15 min). Treat "
+                   "it as the calibration step the strategy skill requires: if the share "
+                   "of your PASSes that reached 2x is far above the p2x you gave them, "
+                   "your probabilities are too low and your bar is set above what the "
+                   "market is actually doing -- raise the estimates and act on them. If "
+                   "your BUY_NOWs reach 2x less often than stated, the reverse. Peaks are "
+                   "not realised exits, so discount them, but not to zero.\n\n"
                    "Every entry in held_positions requires a decision this cycle: "
                    "HOLD, ADD, or SELL_NOW. Position management in the strategy skill "
                    "governs; do not sell at 2x by reflex, and do not hold a "
