@@ -373,6 +373,27 @@ def rejected_recently(asset_id):
     return age if age < config.REJECT_COOLDOWN_SEC else None
 
 
+def auto_approve_until():
+    """Unix time until which NEW buys need no tap, or 0. A bounded, explicit
+    grant: the operator asked for it, confirmed it with a code, and it ends by
+    itself. Every other gate, cap and cooldown still applies to each buy."""
+    try:
+        return float(get_kv("auto_until", "0") or 0)
+    except ValueError:
+        return 0.0
+
+
+def auto_approve_active():
+    return time.time() < auto_approve_until()
+
+
+def set_auto_approve(hours):
+    until = time.time() + hours * 3600 if hours > 0 else 0
+    set_kv("auto_until", str(until))
+    journal.log_event("auto_approve", detail={"hours": hours, "until": until})
+    return until
+
+
 def note_stopout(asset_id):
     set_kv(f"stopout:{asset_id}", str(time.time()))
 

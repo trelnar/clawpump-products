@@ -9,7 +9,10 @@ from . import (alerts, approval, calibration, config, execution, heartbeat,
 def status_text():
     marks, _ = marketdata.marks([p["asset_id"] for p in state.positions()])
     value = state.total_value(marks)
-    lines = [f"STATUS mode={state.get_mode()} phase={state.phase()}",
+    auto = state.auto_approve_until()
+    lines = [f"STATUS mode={state.get_mode()} phase={state.phase()}"
+             + (f" AUTO until {time.strftime('%m-%d %H:%M UTC', time.gmtime(auto))}"
+                if state.auto_approve_active() else ""),
              f"Value: ${value:.2f}  Cash: " +
              " ".join(f"{v}=${u:.2f}" for v, u in state.cash().items())]
     for p in state.positions():
@@ -133,6 +136,15 @@ def supervise_telegram(holder, handler):
                    "Buying halted (SELL_ONLY); exits still active.")
 
 
+def supervise_auto():
+    """Say once when a timed AUTO grant runs out; the operator set it while
+    awake and should not have to remember when it ended."""
+    until = state.auto_approve_until()
+    if until and time.time() >= until and state.get_kv("auto_ended_said") != str(until):
+        state.set_kv("auto_ended_said", str(until))
+        alerts.ops("AUTO mode has expired. New buys need YES again.")
+
+
 def supervise_agent():
     """Watch the research layer from here, because it cannot shout for itself.
 
@@ -228,6 +240,7 @@ def main():
                 last["monitor"] = now
             if now - last["agentwatch"] >= config.AGENT_WATCHDOG_SEC:
                 supervise_agent()
+                supervise_auto()
                 last["agentwatch"] = now
             if now - last["track"] >= config.TRACK_INTERVAL_SEC:
                 calibration.tick()

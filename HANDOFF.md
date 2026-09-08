@@ -43,7 +43,9 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   | Base wallet `0x973813C36Fe55a5299cfa264eA296c69b6527Ca0` | $215 USDC + ~$10 ETH gas |
   | Stranded on Ethereum mainnet (same EVM address) | ~$5 USDC |
 - **Phase 1** of `go-live`: every order $5. First buy of any asset needs Telegram approval;
-  adds and sells are automatic.
+  adds and sells are automatic. `AUTO <hours>` (confirmed with a code, max 72h, `AUTO OFF`)
+  makes new buys execute without a tap for that long; every other gate, cap and cooldown
+  still applies, and the core says when it expires.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).

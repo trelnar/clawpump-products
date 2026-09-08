@@ -7,7 +7,7 @@ from . import alerts, config, journal, state
 
 HELP = ("Unrecognized. Commands: YES <code>, NO <code>, REVOKE <asset>, STOP, "
         "FLATTEN, RESUME, STATUS, REPORT, SCORE [days], GAPS, SIGNALS [asset], "
-        "WHY <asset>")
+        "WHY <asset>, AUTO <hours> | AUTO OFF")
 
 
 def new_code():
@@ -74,6 +74,8 @@ class Commands:
         elif cmd == "REVOKE" and arg:
             state.whitelist_revoke(arg)
             alerts.ops(f"Revoked {arg}. It will require approval again.")
+        elif cmd == "AUTO" and arg:
+            self._auto(arg)
         elif cmd == "STATUS" and not arg:
             alerts.ops(self.status_text())
         elif cmd == "SIGNALS":
@@ -123,6 +125,36 @@ class Commands:
             ph = state.phase() + 1
             state.set_kv("phase", str(ph))
             alerts.ops(f"Advanced to go-live phase {ph}.")
+        elif p["kind"] == "auto":
+            hours = int(state.get_kv(f"auto_hours:{code}", "0") or 0)
+            until = state.set_auto_approve(hours)
+            alerts.ops(f"AUTO mode ON for {hours}h (until "
+                       f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(until))}). New "
+                       "buys execute without a tap; every risk limit, cap and cooldown "
+                       "still applies. AUTO OFF ends it early.")
+
+    def _auto(self, arg):
+        """AUTO <hours>: new buys need no tap for that long. Confirmed with a
+        code like FLATTEN, because it removes the one human step; bounded by
+        AUTO_APPROVE_MAX_HOURS; AUTO OFF ends it."""
+        if arg.upper() == "OFF":
+            state.set_auto_approve(0)
+            alerts.ops("AUTO mode OFF. New buys need YES again.")
+            return
+        try:
+            hours = int(arg)
+        except ValueError:
+            alerts.ops("AUTO <hours> (1-%d) or AUTO OFF" % config.AUTO_APPROVE_MAX_HOURS)
+            return
+        if not 1 <= hours <= config.AUTO_APPROVE_MAX_HOURS:
+            alerts.ops(f"AUTO hours must be 1-{config.AUTO_APPROVE_MAX_HOURS}.")
+            return
+        code = new_code()
+        state.add_pending(code, "auto", None, None, 300)
+        state.set_kv(f"auto_hours:{code}", str(hours))
+        alerts.ops(f"AUTO for {hours}h: every new buy the model proposes will execute "
+                   f"without asking, up to the position cap and risk limits, until it "
+                   f"expires. Confirm with: YES {code} (5 min)")
 
     def _no(self, code):
         p = state.get_pending(code)

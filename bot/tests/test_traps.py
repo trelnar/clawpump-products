@@ -214,3 +214,66 @@ class CoinbaseFees(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoMode(Base):
+    """AUTO <hours>: a bounded standing YES. Confirmed with a code, expires,
+    and changes nothing but gate 5."""
+
+    def setUp(self):
+        super().setUp()
+        self.said = []
+        self.patch(approval.alerts, "ops", self.said.append)
+        self.patch(execution.alerts, "ops", self.said.append)
+        state.set_auto_approve(0)
+        state.set_kv("auto_ended_said", "")
+
+    def _cmds(self):
+        return approval.Commands(lambda p: None, lambda: None, lambda: "", lambda a: "",
+                                 lambda a: "")
+
+    def test_auto_needs_a_code_and_then_buys_without_a_tap(self):
+        c = self._cmds()
+        c.handle("AUTO 24")
+        self.assertFalse(state.auto_approve_active())
+        code = [w for w in self.said[-1].split() if len(w) == 6 and w.isupper()
+                and w.isalnum()][-1]
+        c.handle(f"YES {code}")
+        self.assertTrue(state.auto_approve_active())
+        self.patch(execution, "_run_gates", lambda t, v, f: 1.0)
+        bought = []
+        self.patch(execution, "execute_buy", lambda t, r: bought.append(t) or "filled")
+        asked = []
+        self.patch(approval, "request_buy_approval", lambda t, p, f: asked.append(t))
+        tid = state.add_ticket(asset_id="solana:MintAuto", venue="solana", chain="solana",
+                               action="BUY_NOW", notional_usd=5.0)
+        t = [x for x in state.tickets("new") if x["ticket_id"] == tid][0]
+        self.assertEqual(execution.process_ticket(t, 100.0, True), "filled")
+        self.assertEqual(asked, [])
+        self.assertTrue(state.is_whitelisted("solana:MintAuto"))   # same grant as a tap
+
+    def test_auto_does_not_bypass_a_stopout_or_a_no(self):
+        state.set_auto_approve(24)
+        self.patch(execution, "_run_gates", lambda t, v, f: 1.0)
+        bought = []
+        self.patch(execution, "execute_buy", lambda t, r: bought.append(t) or "filled")
+        state.note_stopout("solana:MintStopped")
+        tid = state.add_ticket(asset_id="solana:MintStopped", venue="solana", chain="solana",
+                               action="BUY_NOW", notional_usd=5.0)
+        t = [x for x in state.tickets("new") if x["ticket_id"] == tid][0]
+        self.assertEqual(execution.process_ticket(t, 100.0, True), "blocked")
+        self.assertEqual(bought, [])
+
+    def test_auto_off_and_expiry(self):
+        c = self._cmds()
+        state.set_auto_approve(24)
+        c.handle("AUTO OFF")
+        self.assertFalse(state.auto_approve_active())
+        c.handle("AUTO 500")
+        self.assertIn("must be", self.said[-1])
+        from tradebot import core
+        self.patch(core.alerts, "ops", self.said.append)
+        state.set_kv("auto_until", str(time.time() - 1))    # just expired
+        core.supervise_auto()
+        core.supervise_auto()
+        self.assertEqual(sum("expired" in s for s in self.said), 1)

@@ -127,6 +127,7 @@ LOSS_THRESHOLD_USD = 0.05        # smaller than this is rounding, not a loss
 APPROVAL_EXPIRY_SEC = 1800       # standard approval expiry
 REJECT_COOLDOWN_SEC = int(env("REJECT_COOLDOWN_SEC", str(24 * 3600)))  # a NO holds this long
 STOPOUT_COOLDOWN_SEC = int(env("STOPOUT_COOLDOWN_SEC", str(6 * 3600)))  # no re-entry after a losing exit
+AUTO_APPROVE_MAX_HOURS = int(env("AUTO_APPROVE_MAX_HOURS", "72"))   # AUTO <hours> ceiling
 APPROVAL_EXPIRY_FAST_SEC = 600   # high-velocity approval expiry
 GATE_TIME_BUDGET_SEC = 5
 GAS_EXITS_FLOOR = 20             # native-token float sized for N exits

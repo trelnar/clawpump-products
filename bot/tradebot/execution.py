@@ -104,6 +104,16 @@ def process_ticket(ticket, total_value, marks_fresh):
         journal.log_event("ticket_stopout_cooldown", ticket["asset_id"],
                           {"stopped_min_ago": int(age / 60)})
         return "blocked"
+    if state.auto_approve_active():
+        # The operator's standing YES, bounded in time. The asset is whitelisted
+        # exactly as a tap would, so the same TTL, re-entry cap and loss-revoke
+        # govern it afterwards; a stop-out or a NO above already blocked it.
+        state.whitelist_add(ticket["asset_id"], ticket.get("chain") or ticket["venue"])
+        journal.log_event("auto_approved", ticket["asset_id"],
+                          {"until": state.auto_approve_until()})
+        alerts.ops(f"AUTO-approved {ticket['asset_id']} ${ticket['notional_usd']:.2f} "
+                   f"(auto mode; NO is not possible, REVOKE <asset> withdraws it)")
+        return execute_buy(ticket, ref)
     approval.request_buy_approval(ticket, ref, {
         "Size": f"${ticket['notional_usd']:.2f}",
         "Zone": f"{ticket.get('buy_zone_lo')}-{ticket.get('buy_zone_hi')}",
