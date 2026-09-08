@@ -53,14 +53,12 @@ lowercased everywhere an id is formed; one spelling per asset.
 
 ## Setup on the VPS
 
-All keys go into `/etc/tradebot/agent.env` (the research layer's file — none of these
-touch trading credentials). Edit with `nano` so nothing prints to the screen:
+Easiest: as root, `python3 /opt/tradebot/scripts/setup-secrets.py` asks for the
+Anthropic key and the three Telegram values one at a time, writes them, and restarts.
 
-```
-sudo nano /etc/tradebot/agent.env
-```
-
-Add whichever lines you have:
+Manual alternative: keys go into `/etc/tradebot/secrets.env`, then run
+`bash /opt/tradebot/scripts/split-credentials.sh` to regenerate the research layer's
+`agent.env`. Add whichever lines you have:
 
 ```
 REDDIT_CLIENT_ID=...      # https://www.reddit.com/prefs/apps -> create app -> type "script"
