@@ -97,6 +97,13 @@ def process_ticket(ticket, total_value, marks_fresh):
         journal.log_event("ticket_rejected_cooldown", ticket["asset_id"],
                           {"rejected_min_ago": int(age / 60)})
         return "blocked"
+    # A stop that just fired is the market's answer. No re-entry for a while.
+    age = state.stopped_out_recently(ticket["asset_id"])
+    if age is not None:
+        state.set_ticket_status(ticket["ticket_id"], "blocked:stopout_cooldown")
+        journal.log_event("ticket_stopout_cooldown", ticket["asset_id"],
+                          {"stopped_min_ago": int(age / 60)})
+        return "blocked"
     approval.request_buy_approval(ticket, ref, {
         "Size": f"${ticket['notional_usd']:.2f}",
         "Zone": f"{ticket.get('buy_zone_lo')}-{ticket.get('buy_zone_hi')}",
@@ -486,6 +493,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
         # trip withdrew an approval over "exited at a loss ($-0.00)".
         if config.WHITELIST_REAPPROVE_AFTER_LOSS and pnl < -config.LOSS_THRESHOLD_USD:
             state.whitelist_revoke(asset_id)
+            state.note_stopout(asset_id)
             journal.log_event("whitelist_ended_on_loss", asset_id, {"pnl": round(pnl, 2)})
             alerts.ops(f"{asset_id} exited at a loss (${pnl:.2f}). Its approval is "
                        "withdrawn; a new buy will ask you again.")

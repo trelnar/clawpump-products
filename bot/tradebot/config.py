@@ -126,6 +126,7 @@ WHITELIST_REAPPROVE_AFTER_LOSS = True   # a losing exit ends the authorisation
 LOSS_THRESHOLD_USD = 0.05        # smaller than this is rounding, not a loss
 APPROVAL_EXPIRY_SEC = 1800       # standard approval expiry
 REJECT_COOLDOWN_SEC = int(env("REJECT_COOLDOWN_SEC", str(24 * 3600)))  # a NO holds this long
+STOPOUT_COOLDOWN_SEC = int(env("STOPOUT_COOLDOWN_SEC", str(6 * 3600)))  # no re-entry after a losing exit
 APPROVAL_EXPIRY_FAST_SEC = 600   # high-velocity approval expiry
 GATE_TIME_BUDGET_SEC = 5
 GAS_EXITS_FLOOR = 20             # native-token float sized for N exits

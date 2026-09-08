@@ -45,8 +45,9 @@ def gather():
         address = asset.split(":", 1)[1]
         if asset in seen or len(enriched) >= config.AGENT_MAX_CANDIDATES:
             return
-        if state.rejected_recently(asset) is not None:
-            seen.add(asset)      # the NO stands; no research spend on it
+        if (state.rejected_recently(asset) is not None
+                or state.stopped_out_recently(asset) is not None):
+            seen.add(asset)      # the NO or the stop stands; no research spend on it
             return
         try:
             info = marketdata.dexscreener_token(chain, address)

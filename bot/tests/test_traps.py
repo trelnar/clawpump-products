@@ -119,6 +119,40 @@ class RejectCooldown(Base):
         self.assertEqual([c["address"] for c in out], ["MintE"])
 
 
+class StopoutCooldown(Base):
+    def test_no_reentry_after_a_losing_exit(self):
+        self.patch(execution, "_run_gates", lambda t, v, f: 1.0)
+        asked = []
+        self.patch(approval, "request_buy_approval", lambda t, p, f: asked.append(t))
+        state.note_stopout("solana:MintS")
+        tid = state.add_ticket(asset_id="solana:MintS", venue="solana", chain="solana",
+                               action="BUY_NOW", notional_usd=5.0)
+        t = [x for x in state.tickets("new") if x["ticket_id"] == tid][0]
+        self.assertEqual(execution.process_ticket(t, 100.0, True), "blocked")
+        self.assertEqual(asked, [])
+        self.patch(config, "STOPOUT_COOLDOWN_SEC", 0)
+        tid = state.add_ticket(asset_id="solana:MintS", venue="solana", chain="solana",
+                               action="BUY_NOW", notional_usd=5.0)
+        t = [x for x in state.tickets("new") if x["ticket_id"] == tid][0]
+        self.assertEqual(execution.process_ticket(t, 100.0, True), "awaiting_approval")
+
+    def test_losing_exit_records_the_stopout(self):
+        state.upsert_position("cex:STP-USDC", "coinbase", None, 2.0, 10.0)
+        state.whitelist_add("cex:STP-USDC", "coinbase")
+        state.set_cash("coinbase", 100.0)
+        from tradebot.exchanges import coinbase as cb
+        cb._products["STP-USDC"] = {"quote_increment": "0.01", "base_increment": "0.00000001"}
+        self.addCleanup(cb._products.clear)
+        self.patch(marketdata, "price", lambda a: 3.0)
+        self.patch(cb, "market_sell", lambda p, q: ("srv-s", {}))
+        self.patch(cb, "order_status", lambda o: {
+            "status": "FILLED", "filled_size": "2", "average_filled_price": "3",
+            "total_fees": "0.02", "filled_value": "6", "order_id": "srv-s"})
+        self.assertEqual(execution.execute_sell("cex:STP-USDC", "invalidation"), "filled")
+        self.assertIsNotNone(state.stopped_out_recently("cex:STP-USDC"))
+        self.assertFalse(state.is_whitelisted("cex:STP-USDC"))
+
+
 class OrderSerialisation(Base):
     def test_concurrent_sells_place_one_order(self):
         """FLATTEN on the Telegram thread and the monitor's sell on the core

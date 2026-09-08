@@ -373,6 +373,22 @@ def rejected_recently(asset_id):
     return age if age < config.REJECT_COOLDOWN_SEC else None
 
 
+def note_stopout(asset_id):
+    set_kv(f"stopout:{asset_id}", str(time.time()))
+
+
+def stopped_out_recently(asset_id):
+    """Seconds since this asset last exited at a loss, or None. On 2026-09-08
+    one token was bought, stopped out, re-proposed and re-bought three times
+    in 35 minutes, each entry lower than the last: a stop is information about
+    the asset, and re-entering minutes later throws it away."""
+    v = get_kv(f"stopout:{asset_id}")
+    if not v:
+        return None
+    age = time.time() - float(v)
+    return age if age < config.STOPOUT_COOLDOWN_SEC else None
+
+
 def expire_pendings():
     expired = journal.query(
         "SELECT * FROM pending_approvals WHERE status='pending' AND expires < ?", (time.time(),))
