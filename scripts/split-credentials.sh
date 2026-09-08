@@ -41,7 +41,9 @@ usermod -aG tbdata bot
 umask 077
 {
   echo "# Research layer only. Nothing here can move money."
-  grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_WORKSPACE_ID|ANTHROPIC_MODEL|AGENT_|DISCOVERY_INTERVAL_SEC|TRADEBOT_DB|SOLANA_RPC|BASE_RPC|TRADEBOT_LOG_STDOUT|SIGNAL_|PAID_PROMO|REDDIT_|NEYNAR_API_KEY|BIRDEYE_API_KEY|TG_|GECKO_|PUMPFUN_)=' "$SECRETS" || true
+  # Prefix families need a suffix pattern: 'TG_' followed directly by '=' matched
+  # nothing, so every TG_* line was silently dropped from agent.env.
+  grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_WORKSPACE_ID|ANTHROPIC_MODEL|DISCOVERY_INTERVAL_SEC|TRADEBOT_DB|SOLANA_RPC|BASE_RPC|TRADEBOT_LOG_STDOUT|NEYNAR_API_KEY|BIRDEYE_API_KEY|(AGENT|SIGNAL|PAID_PROMO|REDDIT|TG|GECKO|PUMPFUN)_[A-Z0-9_]*)=' "$SECRETS" || true
 } > "$AGENT_ENV"
 chown root:agent "$AGENT_ENV"; chmod 640 "$AGENT_ENV"
 

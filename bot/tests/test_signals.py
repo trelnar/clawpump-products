@@ -413,3 +413,26 @@ class TgMon(Base):
         self.patch(_t, "TelegramClient", FakeClient)
         self.patch(config, "TG_API_ID", "1"); self.patch(config, "TG_API_HASH", "h")
         self.assertEqual(asyncio.run(tgmon._run()), tgmon.EXIT_NOT_LOGGED_IN)
+
+
+class CredentialSplit(Base):
+    def test_agent_env_filter_keeps_prefix_families(self):
+        """The grep in split-credentials.sh decides what the research layer can
+        see. 'TG_' followed by '=' matched nothing, so the Telegram monitor's
+        settings never reached agent.env while the script reported success."""
+        import re
+        import subprocess
+        import tempfile
+        src = open(os.path.join(os.path.dirname(__file__), "..", "..", "scripts",
+                                "split-credentials.sh")).read()
+        pat = re.search(r"grep -E '(\^\(.*?\)=)'", src).group(1)
+        f = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False)
+        f.write("COINBASE_API_SECRET=no\nANTHROPIC_API_KEY=yes\nTG_API_ID=yes\n"
+                "TG_API_HASH=yes\nTG_CHANNELS=yes\nSIGNAL_SOURCES=yes\nAGENT_EFFORT=yes\n"
+                "PAID_PROMO_SOURCES=yes\nREDDIT_CLIENT_ID=yes\nTELEGRAM_TOKEN=no\n")
+        f.close()
+        out = subprocess.run(["grep", "-E", pat, f.name], capture_output=True, text=True).stdout
+        keys = {line.split("=")[0] for line in out.splitlines()}
+        self.assertEqual(keys, {"ANTHROPIC_API_KEY", "TG_API_ID", "TG_API_HASH", "TG_CHANNELS",
+                                "SIGNAL_SOURCES", "AGENT_EFFORT", "PAID_PROMO_SOURCES",
+                                "REDDIT_CLIENT_ID"})
