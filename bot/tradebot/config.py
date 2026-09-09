@@ -26,10 +26,10 @@ ANTHROPIC_MODEL = env("ANTHROPIC_MODEL", "claude-opus-5")
 # Leave unset for a Workspace-type key.
 ANTHROPIC_WORKSPACE_ID = env("ANTHROPIC_WORKSPACE_ID")
 # Cost controls (agent layer). Editable via secrets.env without a code change.
-DISCOVERY_INTERVAL_SEC = int(env("DISCOVERY_INTERVAL_SEC", "900"))
+DISCOVERY_INTERVAL_SEC = int(env("DISCOVERY_INTERVAL_SEC", "1800"))  # 30 min: API bill was the larger half of the loss
 AGENT_EFFORT = env("AGENT_EFFORT", "low")          # low effort suits routine scanning
 AGENT_MAX_TOKENS = int(env("AGENT_MAX_TOKENS", "8000"))
-AGENT_MAX_CANDIDATES = int(env("AGENT_MAX_CANDIDATES", "15"))  # payload cap per cycle
+AGENT_MAX_CANDIDATES = int(env("AGENT_MAX_CANDIDATES", "10"))  # payload cap per cycle
 AGENT_CANDLE_SHORTLIST = int(env("AGENT_CANDLE_SHORTLIST", "2"))  # candles fetched per cycle
 SOLANA_KEYFILE = env("SOLANA_KEYFILE", "/etc/tradebot/solana_wallet.json")
 EVM_KEYFILE = env("EVM_KEYFILE", "/etc/tradebot/evm_wallet.key")
@@ -72,7 +72,7 @@ SIGNAL_SOURCES = [x.strip() for x in env(
 # several now, ranked by the same breadth/acceleration rules, not the whole
 # list as it was before.
 PAID_PROMO_SOURCES = env("PAID_PROMO_SOURCES", "1") not in ("0", "false", "")
-SIGNAL_CANDIDATES = int(env("SIGNAL_CANDIDATES", "20"))   # rising assets per cycle
+SIGNAL_CANDIDATES = int(env("SIGNAL_CANDIDATES", "12"))   # rising assets per cycle
 SIGNAL_MIN_LIQUIDITY_USD = float(env("SIGNAL_MIN_LIQUIDITY_USD", "5000"))
 SIGNAL_RETENTION_DAYS = 3
 SIGNAL_SOURCE_BUDGET_SEC = float(env("SIGNAL_SOURCE_BUDGET_SEC", "45"))  # per source per pass
@@ -158,7 +158,7 @@ SETTLE_READ_TRIES = 5            # balance re-reads after a confirmed swap
 SETTLE_READ_SLEEP_SEC = 3
 TELEGRAM_STALE_SEC = 300         # no successful poll for this long -> SELL_ONLY
 TELEGRAM_WATCHDOG_SEC = 30       # how often the core checks the poller
-AGENT_STALE_SEC = 2700           # no completed research cycle -> alert
+AGENT_STALE_SEC = 4500           # no completed research cycle -> alert (2.5 cycles at 30 min)
 AGENT_WATCHDOG_SEC = 300
 TRACK_WINDOW_SEC = 72 * 3600     # forecast resolution horizon (1-3 day thesis)
 TRACK_BATCH = 60                 # forecasts sampled per pass
