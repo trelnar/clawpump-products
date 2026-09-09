@@ -66,7 +66,12 @@ SIGNAL_SOURCES = [x.strip() for x in env(
     "SIGNAL_SOURCES", "gecko,pumpfun,clanker,reddit,farcaster,birdeye").split(",") if x.strip()]
 # Paid-promotion feeds (DexScreener boosts/profiles). Off: they select for
 # tokens someone paid to show, which is late by construction.
-PAID_PROMO_SOURCES = env("PAID_PROMO_SOURCES", "0") not in ("0", "false", "")
+# Back on by default (2026-09-09): three days of resolved PASSes showed the
+# promo-fed pool reaching 2x 31% of the time against 4-11% for the pure signal
+# pool. People pay to promote what is already moving. It is one source among
+# several now, ranked by the same breadth/acceleration rules, not the whole
+# list as it was before.
+PAID_PROMO_SOURCES = env("PAID_PROMO_SOURCES", "1") not in ("0", "false", "")
 SIGNAL_CANDIDATES = int(env("SIGNAL_CANDIDATES", "20"))   # rising assets per cycle
 SIGNAL_MIN_LIQUIDITY_USD = float(env("SIGNAL_MIN_LIQUIDITY_USD", "5000"))
 SIGNAL_RETENTION_DAYS = 3

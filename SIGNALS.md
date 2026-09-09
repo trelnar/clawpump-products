@@ -16,8 +16,9 @@ model, per asset, the shape of attention rather than raw counts:
 Ranking is `accel × breadth^1.5 × (2 if a hard event fired)`, with one rule on top: an
 asset only one source has named is capped below anything two independent sources agree
 on, however loud that one source is. That is the property paid promotion cannot buy. The
-top `SIGNAL_CANDIDATES` (20) go to research each cycle, on top of Coinbase movers. Paid promotion is **off**
-(`PAID_PROMO_SOURCES=0`); set it to `1` to add those feeds back as one more source.
+top `SIGNAL_CANDIDATES` (20) go to research each cycle, on top of Coinbase movers. Paid promotion feeds (DexScreener boosts and profiles) are **on** as one more source
+(`PAID_PROMO_SOURCES=0` turns them off). Three days of resolved forecasts showed the
+promo-fed pool reaching 2x 31% of the time against 4-11% for the pure signal pool.
 
 All message text is data. Nothing in this layer interprets it; only contract addresses
 and `$TICKER`s are extracted and stored.
