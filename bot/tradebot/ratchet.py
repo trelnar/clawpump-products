@@ -171,9 +171,11 @@ def on_tick(p, q, now=None):
     if not st or st.get("entry_ts") != p["entry_ts"]:
         st = _new(p)
         st["hwm"], st["hwm_ts"], st["entry_anchor"] = entry, p["entry_ts"], entry
+    else:
+        st = {**_new(p), "hwm": entry, "hwm_ts": p["entry_ts"], "entry_anchor": entry, **st}
+    write_bar(asset, q, now)             # bars continue after the share is sold
     if st["done"]:
         return None
-    write_bar(asset, q, now)
     minute = int(now // 60)
 
     # minute rollover: the previous bar is complete
@@ -181,11 +183,14 @@ def on_tick(p, q, now=None):
         st["last_minute"], st["cur_close"] = minute, price
     elif minute > st["last_minute"]:
         close = st["cur_close"]
-        _sigma_update(st, close, st["prev_close"])
-        st["prev_close"] = close
         if minute - st["last_minute"] > 1:
-            st["run"] = []                 # a feed gap breaks the dwell
-        st["run"] = (st["run"] + [close])[-config.RATCHET_ARM_DWELL_BARS:]
+            # A feed gap: the pre-gap close neither continues the dwell nor
+            # measures volatility (its return would span the gap).
+            st["run"], st["prev_close"] = [], close
+        else:
+            _sigma_update(st, close, st["prev_close"])
+            st["prev_close"] = close
+            st["run"] = (st["run"] + [close])[-config.RATCHET_ARM_DWELL_BARS:]
         if close > st["hwm"]:
             st["hwm"], st["hwm_ts"] = close, st["last_minute"] * 60 + 60
         st["last_minute"], st["cur_close"] = minute, price

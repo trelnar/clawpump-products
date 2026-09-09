@@ -86,6 +86,13 @@ def process_ticket(ticket, total_value, marks_fresh):
     ref = _run_gates(ticket, total_value, marks_fresh)
     if ref is None:
         return "blocked"
+    # A ratchet winner stays whitelisted, so its pause must come before the
+    # whitelist shortcut or it is unreachable for the only case it exists for.
+    age = ratchet.reentry_paused(ticket["asset_id"])
+    if age is not None:
+        state.set_ticket_status(ticket["ticket_id"], "blocked:ratchet_reentry")
+        journal.log_event("ticket_ratchet_reentry", ticket["asset_id"], {"min_ago": int(age / 60)})
+        return "blocked"
     # gate 5: whitelist or approval
     if state.is_whitelisted(ticket["asset_id"]):
         return execute_buy(ticket, ref)
@@ -96,12 +103,6 @@ def process_ticket(ticket, total_value, marks_fresh):
         state.set_ticket_status(ticket["ticket_id"], "blocked:rejected_cooldown")
         journal.log_event("ticket_rejected_cooldown", ticket["asset_id"],
                           {"rejected_min_ago": int(age / 60)})
-        return "blocked"
-    # A ratchet winner gets a short pause too: a fresh BUY_NOW, not a reflex re-buy.
-    age = ratchet.reentry_paused(ticket["asset_id"])
-    if age is not None:
-        state.set_ticket_status(ticket["ticket_id"], "blocked:ratchet_reentry")
-        journal.log_event("ticket_ratchet_reentry", ticket["asset_id"], {"min_ago": int(age / 60)})
         return "blocked"
     # A stop that just fired is the market's answer. No re-entry for a while.
     age = state.stopped_out_recently(ticket["asset_id"])
@@ -504,6 +505,10 @@ def execute_sell(asset_id, reason, fraction=1.0):
     sold_share = min(qty / held, 1.0) if held else 1.0
     cost_part = pos["cost_basis_usd"] * sold_share
     pnl = proceeds - cost_part
+    # Prior partial exits on this life, read BEFORE this exit's own row is
+    # journaled: reading after it double-counted the closing slice, turning a
+    # +$0.01 life into a "loss" that revoked the approval.
+    prior_pnl = _life_pnl(asset_id, pos.get("entry_ts"))
     # One row per exit with the realised number: the PNL tally reads these.
     journal.log_event("exit_pnl", asset_id, {
         "pnl": round(pnl, 4), "proceeds": round(proceeds, 4), "cost": round(cost_part, 4),
@@ -511,7 +516,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
     if sold_share >= 0.999:
         # Judge the whole position life, not the closing slice: a ratchet that
         # banked +22% on 75% and a breakeven stop on the rest is a win.
-        pnl_total = _life_pnl(asset_id, pos.get("entry_ts")) + pnl
+        pnl_total = prior_pnl + pnl
         # -$0.000001 from fee rounding is not a loss. The first Solana round
         # trip withdrew an approval over "exited at a loss ($-0.00)".
         if config.WHITELIST_REAPPROVE_AFTER_LOSS and pnl_total < -config.LOSS_THRESHOLD_USD:

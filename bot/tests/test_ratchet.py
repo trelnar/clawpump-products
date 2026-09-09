@@ -103,7 +103,23 @@ class Arming(Base):
         st = self.st()
         self.assertTrue(st["armed"])
         self.assertEqual([f for f in fired], [])
-        self.assertLessEqual(st["floor"], 108)          # breakeven-ish floor held
+        self.assertAlmostEqual(st["floor"], 103.0)      # the chop's sigma keeps the floor at breakeven
+
+    def test_low_volatility_grind_lifts_the_floor_above_breakeven(self):
+        p = self.position()
+        grind = [(m, 100 + m * 0.5, 9, 4) for m in range(0, 80)]     # +0.5%/min, steady
+        self.drive(p, grind, until_minute=80)
+        st = self.st()
+        self.assertTrue(st["armed"])
+        self.assertGreater(st["floor"], 110)            # trail follows the peak up
+
+    def test_a_feed_gap_breaks_the_dwell(self):
+        p = self.position()
+        path = [(0, 100, 5, 2), (11, 125, 8, 3)]
+        self.drive(p, path, until_minute=12)            # one close at 125
+        later = [(40, 126, 8, 3), (41, 127, 8, 3)]
+        self.drive(p, later, until_minute=43)           # two more after a 28-min gap
+        self.assertFalse(self.st()["armed"])
 
 
 class Triggers(Base):
@@ -114,6 +130,10 @@ class Triggers(Base):
                 (8, 145, 12, 6), (11, 150, 10, 8), (13, 142, 6, 12)]
         fired = self.drive(p, path, until_minute=14)
         self.assertTrue(fired and fired[-1][1] == "take", fired)
+        row = journal.query("SELECT detail FROM events WHERE kind='ratchet_would_sell'")[-1]
+        d = json.loads(row["detail"])
+        self.assertGreaterEqual(d["price"], 142)         # on the turn, not on the way down
+        self.assertLessEqual(d["price"], 150)
         rows = journal.query("SELECT * FROM ratchet_track")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["trigger"], "take")
@@ -148,10 +168,18 @@ class Triggers(Base):
         p2 = self.position(asset="solana:HoldMint")
         self.drive(p2, arm, until_minute=35)
         journal.log_forecast({"asset_id": "solana:HoldMint", "action": "HOLD", "p2x": 0.4,
-                              "ts": T0 + 36 * 60})
-        self.patch(ratchet, "_hold_fresh", lambda a, now: True)
+                              "ts": T0 + 50 * 60})
+        from tradebot import signals
+        self.patch(signals, "features", lambda a: {"accel": 1.0})
         fired = self.drive(p2, cold, until_minute=75)
         self.assertNotIn("stall", [f[1] for f in fired])
+        # the same HOLD, stale (older than 35 min at the check) -> no suppression
+        p3 = self.position(asset="solana:StaleHold")
+        self.drive(p3, arm, until_minute=35)
+        journal.log_forecast({"asset_id": "solana:StaleHold", "action": "HOLD", "p2x": 0.4,
+                              "ts": T0 - 3600})
+        fired = self.drive(p3, cold, until_minute=75)
+        self.assertIn("stall", [f[1] for f in fired])
 
 
 class LiveMode(Base):
@@ -193,6 +221,35 @@ class LiveMode(Base):
         p = self.position()
         ratchet.on_close(p["asset_id"], -0.5)
         self.assertIsNone(ratchet.reentry_paused(p["asset_id"]))
+
+
+class LifePnl(Base):
+    def test_close_after_a_partial_does_not_double_count(self):
+        """Plan leg +$0.08, then close at -$0.07: a +$0.01 life is a win."""
+        from tradebot import marketdata
+        from tradebot.exchanges import coinbase
+        coinbase._products["LIFE-USDC"] = {"quote_increment": "0.01", "base_increment": "0.00000001"}
+        self.addCleanup(coinbase._products.clear)
+        state.upsert_position("cex:LIFE-USDC", "coinbase", None, 2.0, 4.0)
+        state.whitelist_add("cex:LIFE-USDC", "coinbase")
+        state.set_cash("coinbase", 100.0)
+        self.patch(marketdata, "price", lambda a: 2.0)
+        self.patch(coinbase, "market_sell", lambda p, q: ("srv-l", {}))
+        fills = iter([("1", "2.08", "0", "2.08"), ("1", "1.93", "0", "1.93")])
+
+        def status(o):
+            size, avg, fee, val = next(fills)
+            return {"status": "FILLED", "filled_size": size, "average_filled_price": avg,
+                    "total_fees": fee, "filled_value": val, "order_id": "srv-l"}
+        self.patch(coinbase, "order_status", status)
+        for mod, name, old in self.patches:      # this test needs the real execute_sell
+            if name == "execute_sell":
+                setattr(mod, name, old)
+        real_sell = execution.execute_sell
+        self.assertEqual(real_sell("cex:LIFE-USDC", "leg", 0.5), "filled")     # +0.08
+        self.assertEqual(real_sell("cex:LIFE-USDC", "close", 1.0), "filled")   # -0.07
+        self.assertTrue(state.is_whitelisted("cex:LIFE-USDC"))                # net +0.01: not a loss
+        self.assertIsNone(state.stopped_out_recently("cex:LIFE-USDC"))
 
 
 class Report(Base):
