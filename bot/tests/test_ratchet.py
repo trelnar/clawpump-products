@@ -28,6 +28,7 @@ class Base(unittest.TestCase):
             journal.conn().execute("DELETE FROM events WHERE kind LIKE 'ratchet%'")
             journal.conn().commit()
         self.patches = []
+        state.set_kv("ratchet_mode", "")
         self.patch(config, "RATCHET_MODE", "shadow")
         self.sold = []
         self.patch(execution, "execute_sell",
@@ -250,6 +251,25 @@ class LifePnl(Base):
         self.assertEqual(real_sell("cex:LIFE-USDC", "close", 1.0), "filled")   # -0.07
         self.assertTrue(state.is_whitelisted("cex:LIFE-USDC"))                # net +0.01: not a loss
         self.assertIsNone(state.stopped_out_recently("cex:LIFE-USDC"))
+
+
+class ModeSwitch(Base):
+    def test_telegram_override_wins_and_live_exit_is_scored(self):
+        from tradebot import core
+        self.assertEqual(ratchet.mode(), "shadow")
+        self.assertIn("RATCHET LIVE", core.ratchet_text("LIVE"))
+        self.assertEqual(ratchet.mode(), "live")
+        p = self.position()
+        path = [(0, 100, 8, 3), (60, 130, 12, 4), (61, 131, 12, 4), (62, 130, 12, 4), (63, 131, 12, 4)]
+        self.drive(p, path, until_minute=66)
+        p = state.get_position(p["asset_id"])
+        below = {"price": 100.5, "fresh": True, "ts": 0, "buys_m5": 5, "sells_m5": 5}
+        ratchet.on_tick(p, below, T0 + 70 * 60)
+        self.assertEqual(ratchet.on_tick(p, below, T0 + 70 * 60 + 30), "floor")
+        self.assertEqual(len(self.sold), 1)
+        self.assertEqual(journal.query("SELECT COUNT(*) n FROM ratchet_track")[0]["n"], 1)
+        core.ratchet_text("SHADOW")
+        self.assertEqual(ratchet.mode(), "shadow")
 
 
 class Report(Base):

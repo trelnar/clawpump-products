@@ -85,6 +85,14 @@ def pnl_text(arg=None):
 
 def ratchet_text(arg=None):
     from . import ratchet
+    if arg and arg.upper() in ("LIVE", "SHADOW", "OFF"):
+        m = arg.lower()
+        ratchet.set_mode(m)
+        return {"live": "RATCHET LIVE: after +20% has held, 75% of a position is sold on a "
+                        "blow-off, floor breach or cold stall, never below breakeven. The "
+                        "other 25% rides. RATCHET SHADOW turns it back to watch-only.",
+                "shadow": "RATCHET SHADOW: watching and scoring, no orders.",
+                "off": "RATCHET OFF: no bars, no scoring, no orders."}[m]
     try:
         days = int(arg) if arg else 30
     except (TypeError, ValueError):
@@ -314,7 +322,7 @@ def main():
                         # asset, so gate 5 passes on the whitelist; the risk
                         # limits still see the combined position.
                         from . import ratchet as _ratchet
-                        if (t["action"] == "ADD" and config.RATCHET_MODE == "live"
+                        if (t["action"] == "ADD" and _ratchet.mode() == "live"
                                 and _ratchet.is_armed(t["asset_id"])):
                             # an add would move the entry the floor is built on
                             state.set_ticket_status(t["ticket_id"], "blocked:ratchet_armed")

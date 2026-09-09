@@ -7,7 +7,7 @@ from . import alerts, config, journal, state
 
 HELP = ("Unrecognized. Commands: YES <code>, NO <code>, REVOKE <asset>, STOP, "
         "FLATTEN, RESUME, STATUS, REPORT, SCORE [days], GAPS, SIGNALS [asset], "
-        "WHY <asset>, PNL [days], RATCHET [days], AUTO <hours> | AUTO OFF")
+        "WHY <asset>, PNL [days], RATCHET [days|LIVE|SHADOW|OFF], AUTO <hours> | AUTO OFF")
 
 
 def new_code():

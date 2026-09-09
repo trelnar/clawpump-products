@@ -22,6 +22,19 @@ from . import config, journal, state
 
 _KEY = "ratchet:{}"
 TRIGGERS = ("take", "floor", "stall")
+MODES = ("off", "shadow", "live")
+
+
+def mode():
+    """RATCHET LIVE / SHADOW / OFF in Telegram overrides the config default,
+    so switching needs no VPS session."""
+    v = state.get_kv("ratchet_mode")
+    return v if v in MODES else config.RATCHET_MODE
+
+
+def set_mode(m):
+    state.set_kv("ratchet_mode", m)
+    journal.log_event("ratchet_mode", detail=m)
 
 
 # --- persistence ------------------------------------------------------------
@@ -159,8 +172,8 @@ def _blowoff(asset_id, st, price, minute, now):
 def on_tick(p, q, now=None):
     """Called once per monitor tick for a held position with a fresh quote.
     Returns the trigger name when a sell fired (live) or would have (shadow)."""
-    mode = config.RATCHET_MODE
-    if mode == "off" or not q or not q.get("price"):
+    m = mode()
+    if m == "off" or not q or not q.get("price"):
         return None
     asset, price = p["asset_id"], q["price"]
     entry = entry_price(p)
@@ -205,9 +218,9 @@ def on_tick(p, q, now=None):
         st["budget_qty"] = config.RATCHET_FRACTION * (p["qty"] or 0)
         st["floor"] = entry * config.RATCHET_BE_STOP
         journal.log_event("ratchet_armed", asset, {
-            "mode": mode, "entry": entry, "closes": st["run"], "hwm": st["hwm"],
+            "mode": m, "entry": entry, "closes": st["run"], "hwm": st["hwm"],
             "budget_qty": st["budget_qty"], "sigma15": round(sigma15(st), 4)})
-        if mode == "live":
+        if m == "live":
             inv = max(p.get("invalidation_price") or 0, entry * config.RATCHET_BE_STOP)
             state.upsert_position(asset, p["venue"], p.get("chain"), 0, 0, invalidation=inv)
         age_h = (now - st["entry_ts"]) / 3600
@@ -242,8 +255,8 @@ def _fire(p, st, q, trigger, entry, now):
     detail = {"trigger": trigger, "price": price, "entry": entry, "hwm": st["hwm"],
               "floor": st["floor"], "fraction": round(fraction, 4),
               "multiple": round(price / entry, 4), "sigma15": round(sigma15(st), 4),
-              "minutes_held": round((now - st["entry_ts"]) / 60, 1), "mode": config.RATCHET_MODE}
-    if config.RATCHET_MODE == "live":
+              "minutes_held": round((now - st["entry_ts"]) / 60, 1), "mode": mode()}
+    if mode() == "live":
         from . import execution
         result = execution.execute_sell(asset, f"ratchet {trigger} at {price:.4g}",
                                         execution.clamp_fraction(fraction))
@@ -251,8 +264,10 @@ def _fire(p, st, q, trigger, entry, now):
         journal.log_event("ratchet_exit", asset, detail)
         if result in ("filled", "dust", "no_position"):
             st["budget_qty"], st["done"] = 0.0, True
-        return
-    journal.log_event("ratchet_would_sell", asset, detail)
+        else:
+            return          # not sold: no counterfactual to score
+    else:
+        journal.log_event("ratchet_would_sell", asset, detail)
     with journal._lock:
         journal.conn().execute(
             "INSERT INTO ratchet_track (asset_id, entry_ts, entry_price, armed_ts, trigger, "
@@ -270,7 +285,7 @@ def on_close(asset_id, pnl_total):
     """Full close of a position life. A ratchet winner gets a short re-buy
     pause instead of nothing; losers keep the existing 6h stop-out path."""
     st = load(asset_id)
-    if st and st.get("armed") and config.RATCHET_MODE == "live" and pnl_total >= 0:
+    if st and st.get("armed") and mode() == "live" and pnl_total >= 0:
         state.set_kv(f"ratchet_exit:{asset_id}", str(time.time()))
     clear(asset_id)
 
@@ -294,7 +309,7 @@ def summary(asset_id):
     if not st or not st.get("armed"):
         return None
     return {"armed": True, "hwm": st["hwm"], "floor": st["floor"],
-            "share_remaining": st["budget_qty"] > 0, "mode": config.RATCHET_MODE,
+            "share_remaining": st["budget_qty"] > 0, "mode": mode(),
             "minutes_since_peak": round((time.time() - st["hwm_ts"]) / 60) if st["hwm_ts"] else None}
 
 
@@ -344,7 +359,7 @@ def report_text(days=30):
                           (since,))[0]["n"]
     rows = journal.query("SELECT * FROM ratchet_track WHERE shadow_ts>? ORDER BY shadow_ts",
                          (since,))
-    lines = [f"RATCHET {days}d  mode={config.RATCHET_MODE}  share={config.RATCHET_FRACTION:.0%}",
+    lines = [f"RATCHET {days}d  mode={mode()}  share={config.RATCHET_FRACTION:.0%}",
              f"armed {armed}, would-sell {len(rows)}"
              + ("  (" + ", ".join(f"{t} {sum(1 for r in rows if r['trigger'] == t)}"
                                   for t in TRIGGERS) + ")" if rows else "")]

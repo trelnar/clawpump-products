@@ -60,8 +60,11 @@ worked examples: the operator's case, whipsaw, sniper sandwich, spike-and-dump).
 - **Gate 2 (tail):** no more than 10% of would-sells happened below 1.15x on a token that
   then reached 2x within 72h.
 
-Both pass on ~30 armed positions → `RATCHET_MODE=live` in `secrets.env`, run
-`split-credentials.sh`, restart the core. Gate 1 fails → do not enable. Gate 2 fails →
+Switch from Telegram: `RATCHET LIVE`, `RATCHET SHADOW`, `RATCHET OFF` (overrides the
+config default, no VPS session). Live exits also get a counterfactual row, so the tail
+check keeps scoring after going live. The operator chose to go live on 2026-09-09 after
+one shadow arm: the downside is opportunity (a capped 75% on the rare 5x), not capital,
+and the scoring continues. Gate 1 fails → do not enable. Gate 2 fails →
 the lock or STALL is too tight.
 
 ## Operator's choices (2026-09-09)

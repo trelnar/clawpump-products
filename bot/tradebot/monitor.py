@@ -81,7 +81,7 @@ def check_positions():
         if run_profit_plan(p, price):
             continue
         try:
-            if ratchet.on_tick(p, q, now) and config.RATCHET_MODE == "live":
+            if ratchet.on_tick(p, q, now) and ratchet.mode() == "live":
                 continue
         except Exception as e:                       # the ratchet must never take the stop down
             journal.log_event("ratchet_error", asset, repr(e)[:200])
