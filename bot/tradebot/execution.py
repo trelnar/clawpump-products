@@ -5,7 +5,7 @@ import json
 import threading
 import time
 
-from . import alerts, approval, config, journal, marketdata, risk, state
+from . import alerts, approval, config, journal, marketdata, ratchet, risk, state
 from .exchanges import coinbase, evm_dex, solana_dex
 
 
@@ -96,6 +96,12 @@ def process_ticket(ticket, total_value, marks_fresh):
         state.set_ticket_status(ticket["ticket_id"], "blocked:rejected_cooldown")
         journal.log_event("ticket_rejected_cooldown", ticket["asset_id"],
                           {"rejected_min_ago": int(age / 60)})
+        return "blocked"
+    # A ratchet winner gets a short pause too: a fresh BUY_NOW, not a reflex re-buy.
+    age = ratchet.reentry_paused(ticket["asset_id"])
+    if age is not None:
+        state.set_ticket_status(ticket["ticket_id"], "blocked:ratchet_reentry")
+        journal.log_event("ticket_ratchet_reentry", ticket["asset_id"], {"min_ago": int(age / 60)})
         return "blocked"
     # A stop that just fired is the market's answer. No re-entry for a while.
     age = state.stopped_out_recently(ticket["asset_id"])
@@ -503,9 +509,12 @@ def execute_sell(asset_id, reason, fraction=1.0):
         "pnl": round(pnl, 4), "proceeds": round(proceeds, 4), "cost": round(cost_part, 4),
         "share": round(sold_share, 4), "reason": reason[:60]})
     if sold_share >= 0.999:
+        # Judge the whole position life, not the closing slice: a ratchet that
+        # banked +22% on 75% and a breakeven stop on the rest is a win.
+        pnl_total = _life_pnl(asset_id, pos.get("entry_ts")) + pnl
         # -$0.000001 from fee rounding is not a loss. The first Solana round
         # trip withdrew an approval over "exited at a loss ($-0.00)".
-        if config.WHITELIST_REAPPROVE_AFTER_LOSS and pnl < -config.LOSS_THRESHOLD_USD:
+        if config.WHITELIST_REAPPROVE_AFTER_LOSS and pnl_total < -config.LOSS_THRESHOLD_USD:
             state.whitelist_revoke(asset_id)
             state.note_stopout(asset_id)
             journal.log_event("whitelist_ended_on_loss", asset_id, {"pnl": round(pnl, 2)})
@@ -513,6 +522,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
                        "withdrawn; a new buy will ask you again.")
         else:
             state.note_reentry(asset_id)
+        ratchet.on_close(asset_id, pnl_total)
         state.close_position(asset_id)
     else:
         state.upsert_position(asset_id, venue, chain, -qty, -cost_part)
@@ -523,6 +533,21 @@ def execute_sell(asset_id, reason, fraction=1.0):
     alerts.sell_alert(asset_id, price, reason,
                       pnl_pct=(pnl / cost_part) if cost_part else None)
     return "filled"
+
+
+def _life_pnl(asset_id, entry_ts):
+    """Realised P&L already booked on this position life (partial exits)."""
+    if entry_ts is None:
+        return 0.0
+    rows = journal.query("SELECT detail FROM events WHERE kind='exit_pnl' AND asset_id=? AND ts>?",
+                         (asset_id, entry_ts))
+    total = 0.0
+    for r in rows:
+        try:
+            total += float(json.loads(r["detail"]).get("pnl") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def flatten_all():

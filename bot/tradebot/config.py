@@ -133,6 +133,34 @@ APPROVAL_EXPIRY_SEC = 1800       # standard approval expiry
 REJECT_COOLDOWN_SEC = int(env("REJECT_COOLDOWN_SEC", str(24 * 3600)))  # a NO holds this long
 STOPOUT_COOLDOWN_SEC = int(env("STOPOUT_COOLDOWN_SEC", str(6 * 3600)))  # no re-entry after a losing exit
 AUTO_APPROVE_MAX_HOURS = int(env("AUTO_APPROVE_MAX_HOURS", "72"))   # AUTO <hours> ceiling
+
+# --- the ratchet (context-aware profit exit; see RATCHET.md) ---------------
+# off: nothing. shadow: compute, journal would-sells, never trade (the gate for
+# going live is the RATCHET report). live: sells the ratchet share.
+RATCHET_MODE = env("RATCHET_MODE", "shadow")
+RATCHET_G_ARM = float(env("RATCHET_G_ARM", "0.20"))          # arm once +20% has HELD...
+RATCHET_ARM_DWELL_BARS = int(env("RATCHET_ARM_DWELL_BARS", "3"))  # ...for 3 consecutive 1-min closes
+RATCHET_BE_STOP = 1.03                 # on arm, stop rises to breakeven incl. exit cost
+RATCHET_FRACTION = float(env("RATCHET_FRACTION", "0.75"))    # share the ratchet may sell (operator: 75%)
+RATCHET_KEEP = 0.50                    # lock = entry + half the peak gain...
+RATCHET_LOCK_NOISE = 1.5               # ...once that sits 1.5 sigma15 under the peak
+RATCHET_K0, RATCHET_K_MIN, RATCHET_K_MAX = 2.0, 1.0, 3.0   # give-back in sigma15 units
+RATCHET_GB_MIN_TOKEN, RATCHET_GB_MIN_CEX, RATCHET_GB_MAX = 0.04, 0.025, 0.35
+RATCHET_SIGMA_ALPHA = 0.05             # EWMA of |1-min log return|
+RATCHET_SIGMA_SEED_TOKEN, RATCHET_SIGMA_SEED_CEX = 0.03, 0.003
+RATCHET_SIGMA_MIN, RATCHET_SIGMA_MAX = 0.002, 0.08
+RATCHET_TAKE_V15 = 0.30                # blow-off: +30% over 15 min...
+RATCHET_TAKE_DECEL = -0.10             # ...with the last 5 min turning down
+RATCHET_TAKE_COLD_AGE_H = 2.0          # arming inside 2h with sellers > buyers: take
+RATCHET_STALL_MIN_MIN, RATCHET_STALL_MAX_MIN = 20, 120   # no new peak for 10 min/hour of age, clamped
+RATCHET_STALL_HOLD_P2X = 0.25          # a fresh model HOLD at this p2x suppresses STALL
+RATCHET_HOLD_FRESH_SEC = 35 * 60
+RATCHET_FLOOR_BREACHES = 2             # fresh ticks below the floor before FLOOR fires
+RATCHET_COLD_MIN_TXNS = 6              # 5-min buys+sells needed before flow means anything
+RATCHET_REENTRY_SEC = 2 * 3600         # pause before re-buying a ratchet winner
+RATCHET_TRACK_SEC = 72 * 3600          # counterfactual window after a shadow sell
+PRICE_BARS_RETENTION_DAYS = 7
+FRESH_TICK_SEC = 30                    # an unchanged price counts as fresh again after this
 # $/M tokens for the research model, for the PNL tally (claude-opus-5 list prices)
 PRICE_IN_PER_M = float(env("PRICE_IN_PER_M", "5"))
 PRICE_OUT_PER_M = float(env("PRICE_OUT_PER_M", "25"))
@@ -173,7 +201,7 @@ LIQ_DRAIN_EXIT = 0.50            # -> exit evaluation, default exit
 # --- go-live phases (go-live skill) -----------------------------------------
 # phase: 0 = wiring (no orders), 1 = venue-minimum sizing, 2..4 = 25/50/100%
 PHASE_SIZE_FACTOR = {0: 0.0, 1: 0.0, 2: 0.25, 3: 0.50, 4: 1.00}
-PHASE1_ORDER_USD = 5.0           # venue-minimum sizing for phase 1
+PHASE1_ORDER_USD = float(env("PHASE1_ORDER_USD", "10"))   # phase-1 order size (operator: $10, 2026-09-09)
 
 VENUES = {"coinbase": "cex", "solana": "chain", "base": "chain"}
 CHAIN_GAS_TOKEN = {"solana": "SOL", "base": "ETH"}

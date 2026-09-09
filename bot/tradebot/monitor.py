@@ -2,7 +2,7 @@
 sells immediately — no model call, no approval. Runs inside the core loop."""
 import time
 
-from . import config, execution, journal, marketdata, state
+from . import config, execution, journal, marketdata, ratchet, state
 
 
 def entry_price(p):
@@ -44,34 +44,48 @@ def run_profit_plan(p, price):
     return False
 
 
+_last_prune = [0.0]
+
+
 def check_positions():
-    """One monitoring pass over every held position."""
+    """One monitoring pass over every held position. ONE market read per
+    position per tick; the order is invalidation, liquidity drain, standing
+    plan leg, ratchet, time-stop flag."""
+    now = time.time()
+    if now - _last_prune[0] > 3600:
+        ratchet.prune_bars(now)
+        _last_prune[0] = now
     for p in state.positions():
         asset = p["asset_id"]
-        price = marketdata.price(asset)
-        if price is None:
+        q = marketdata.quote(asset)
+        if not q:
             journal.log_event("monitor_blind", asset, "no price; treating as deteriorating")
             continue
+        price = q["price"]
         inv = p.get("invalidation_price")
         if inv and price <= inv:
             journal.log_event("invalidation_cross", asset, {"price": price, "inv": inv})
             execution.execute_sell(asset, f"invalidation {inv} crossed at {price}")
             continue
+        # liquidity deterioration on tokens (same read, no second call)
+        if p.get("chain") in ("solana", "base") and p.get("entry_liquidity_usd") \
+                and q.get("liquidity_usd") is not None:
+            drop = 1 - q["liquidity_usd"] / p["entry_liquidity_usd"]
+            if drop >= config.LIQ_DRAIN_EXIT:
+                journal.log_event("liquidity_drain", asset, {"drop": drop})
+                execution.execute_sell(asset, f"pool liquidity down {drop:.0%}")
+                continue
+            elif drop >= config.LIQ_DRAIN_WARN:
+                journal.log_event("liquidity_warn", asset, {"drop": drop})
+                state.set_kv(f"reeval:{asset}", str(time.time()))
         if run_profit_plan(p, price):
             continue
+        try:
+            if ratchet.on_tick(p, q, now) and config.RATCHET_MODE == "live":
+                continue
+        except Exception as e:                       # the ratchet must never take the stop down
+            journal.log_event("ratchet_error", asset, repr(e)[:200])
         time_stop_check(p)
-        # liquidity deterioration on tokens
-        if p.get("chain") in ("solana", "base") and p.get("entry_liquidity_usd"):
-            addr = asset.split(":", 1)[1]
-            info = marketdata.dexscreener_token(p["chain"], addr)
-            if info:
-                drop = 1 - info["liquidity_usd"] / p["entry_liquidity_usd"]
-                if drop >= config.LIQ_DRAIN_EXIT:
-                    journal.log_event("liquidity_drain", asset, {"drop": drop})
-                    execution.execute_sell(asset, f"pool liquidity down {drop:.0%}")
-                elif drop >= config.LIQ_DRAIN_WARN:
-                    journal.log_event("liquidity_warn", asset, {"drop": drop})
-                    state.set_kv(f"reeval:{asset}", str(time.time()))
 
 
 def reconcile_positions():

@@ -32,10 +32,14 @@ def _rows():
 def tick():
     """One sampling pass. Cheap: it reuses marks the monitor already fetches."""
     rows = _rows()
-    if not rows:
+    from . import ratchet
+    pending = journal.query("SELECT DISTINCT asset_id FROM ratchet_track WHERE resolved=0")
+    assets = sorted({r["asset_id"] for r in rows} | {r["asset_id"] for r in pending})
+    if not assets:
         return 0
-    marks, _ = marketdata.marks([r["asset_id"] for r in rows])
+    marks, _ = marketdata.marks(assets)
     now = time.time()
+    ratchet.track(marks, now)
     updated = 0
     for r in rows:
         px = marks.get(r["asset_id"])

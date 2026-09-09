@@ -74,8 +74,11 @@ def dexscreener_token(chain, address):
         px = (base_usd / base_in_ours) if base_in_ours > 0 else 0.0
     else:
         return None
+    m5 = (best.get("txns") or {}).get("m5") or {}
     return {
         "price": px,
+        "buys_m5": int(m5.get("buys") or 0),
+        "sells_m5": int(m5.get("sells") or 0),
         "liquidity_usd": float((best.get("liquidity") or {}).get("usd") or 0),
         "volume_h24": float((best.get("volume") or {}).get("h24") or 0),
         "pair_address": best.get("pairAddress"),
@@ -105,6 +108,39 @@ def price(asset_id):
     except Exception as e:
         journal.log_event("price_fetch_fail", asset_id, str(e))
         return None
+
+
+_last_tick = {}     # asset_id -> (price, ts of last FRESH print)
+
+
+def quote(asset_id):
+    """One read per monitor tick: price plus, for tokens, pool liquidity and
+    5-minute buy/sell counts. `fresh` is True when the print changed since the
+    last tick, or FRESH_TICK_SEC passed (a frozen print on a dead pool must
+    still be able to trip a floor). Returns None when blind."""
+    kind, _, ident = asset_id.partition(":")
+    now = time.time()
+    try:
+        if kind == "cex":
+            p, info = coinbase_spot(ident), None
+        else:
+            info = dexscreener_token(kind, ident)
+            p = info["price"] if info else None
+    except Exception as e:
+        journal.log_event("price_fetch_fail", asset_id, str(e))
+        return None
+    if not p or p <= 0:
+        return None
+    _price_cache[asset_id] = (p, now)
+    last = _last_tick.get(asset_id)
+    fresh = (last is None) or (p != last[0]) or (now - last[1] >= config.FRESH_TICK_SEC)
+    if fresh:
+        _last_tick[asset_id] = (p, now)
+    return {
+        "price": p, "fresh": fresh, "ts": now,
+        "liquidity_usd": (info or {}).get("liquidity_usd"),
+        "buys_m5": (info or {}).get("buys_m5"), "sells_m5": (info or {}).get("sells_m5"),
+    }
 
 
 def cached_price(asset_id):

@@ -5,7 +5,7 @@ import json
 import re
 import time
 
-from .. import calibration, config, journal, marketdata, risk, state
+from .. import calibration, config, journal, marketdata, ratchet, risk, state
 from . import prompts
 
 MAX_CANDIDATES_PER_CYCLE = 6
@@ -118,6 +118,7 @@ def held_context():
                           if p.get("entry_ts") is not None else None),
             "invalidation_price": p.get("invalidation_price"),
             "standing_profit_plan": plan,
+            "ratchet": ratchet.summary(p["asset_id"]),
             "entry_liquidity_usd": p.get("entry_liquidity_usd"),
             # The skill: at 2x, reassess take-profit / hold / scale-out. Never
             # an instruction to sell -- only a flag that the decision is due.

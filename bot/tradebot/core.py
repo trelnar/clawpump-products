@@ -83,6 +83,15 @@ def pnl_text(arg=None):
     return "\n".join(lines)
 
 
+def ratchet_text(arg=None):
+    from . import ratchet
+    try:
+        days = int(arg) if arg else 30
+    except (TypeError, ValueError):
+        days = 30
+    return ratchet.report_text(days)
+
+
 def score_text(arg=None):
     try:
         days = int(arg) if arg else 30
@@ -264,6 +273,7 @@ def main():
     cmds.gaps_text = gaps_text
     cmds.signals_text = signals_text
     cmds.pnl_text = pnl_text
+    cmds.ratchet_text = ratchet_text
     alerts.bind_sender(telegram.send)
     holder = {"p": telegram.Poller(cmds.handle)}
     holder["p"].start()
@@ -303,6 +313,13 @@ def main():
                         # An ADD targets a held (therefore already approved)
                         # asset, so gate 5 passes on the whitelist; the risk
                         # limits still see the combined position.
+                        from . import ratchet as _ratchet
+                        if (t["action"] == "ADD" and config.RATCHET_MODE == "live"
+                                and _ratchet.is_armed(t["asset_id"])):
+                            # an add would move the entry the floor is built on
+                            state.set_ticket_status(t["ticket_id"], "blocked:ratchet_armed")
+                            journal.log_event("ticket_ratchet_armed", t["asset_id"])
+                            continue
                         execution.process_ticket(t, value, fresh)
                     elif t["action"] == "SELL_NOW":
                         frac = execution.clamp_fraction(t.get("sell_fraction"))

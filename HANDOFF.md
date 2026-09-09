@@ -42,7 +42,11 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   | Solana wallet `dHTaGtKmUiKHQfDqNo5Hom5WQ6u2SnnhjbEtMoBpoht` | $390 USDC + ~0.0965 SOL gas |
   | Base wallet `0x973813C36Fe55a5299cfa264eA296c69b6527Ca0` | $215 USDC + ~$10 ETH gas |
   | Stranded on Ethereum mainnet (same EVM address) | ~$5 USDC |
-- **Phase 1** of `go-live`: every order $5. First buy of any asset needs Telegram approval;
+- **The ratchet** (`RATCHET.md`): a context-aware profit exit, in SHADOW since 2026-09-09.
+  It arms after +20% has held for three 1-minute closes, and would sell 75% on a blow-off,
+  floor breach or cold stall. `RATCHET` in Telegram reports the shadow gate; it trades only
+  once `RATCHET_MODE=live`. The monitor now logs 1-minute bars for every held asset.
+- **Phase 1** of `go-live`: every order $10 (was $5 until 2026-09-09). First buy of any asset needs Telegram approval;
   adds and sells are automatic. `AUTO <hours>` (confirmed with a code, max 72h, `AUTO OFF`)
   makes new buys execute without a tap for that long; every other gate, cap and cooldown
   still applies, and the core says when it expires.

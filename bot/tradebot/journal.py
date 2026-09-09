@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS discovery_inputs (
   input_id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL NOT NULL, asset_id TEXT, source TEXT, payload TEXT
 );
+CREATE TABLE IF NOT EXISTS price_bars (
+  asset_id TEXT NOT NULL, minute_ts INTEGER NOT NULL, close REAL NOT NULL,
+  buys5 INTEGER, sells5 INTEGER, liquidity_usd REAL,
+  PRIMARY KEY (asset_id, minute_ts)
+);
+CREATE TABLE IF NOT EXISTS ratchet_track (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT NOT NULL, entry_ts REAL, entry_price REAL, armed_ts REAL,
+  trigger TEXT, shadow_price REAL, shadow_ts REAL, fraction REAL,
+  hwm REAL, floor REAL, sigma15 REAL,
+  max_after REAL, last_ts REAL, resolved INTEGER DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS forecast_tracking (
   forecast_id INTEGER PRIMARY KEY, asset_id TEXT, action TEXT,
   start_ts REAL, start_price REAL, max_price REAL, last_ts REAL, resolved INTEGER DEFAULT 0
