@@ -39,6 +39,50 @@ def report_text(arg=None):
             f"(exits {fills['s'] or 0}). Mode {state.get_mode()}, phase {state.phase()}.")
 
 
+def pnl_text(arg=None):
+    """Running tally: realised from exits, unrealised on what is held, API
+    cost from journaled token usage, and the net of the three."""
+    try:
+        days = int(arg) if arg else 30
+    except (TypeError, ValueError):
+        days = 30
+    since = time.time() - days * 86400
+    ex = journal.query(
+        "SELECT COUNT(*) n, COALESCE(SUM(json_extract(detail,'$.pnl')),0) pnl, "
+        "SUM(CASE WHEN json_extract(detail,'$.pnl') > 0 THEN 1 ELSE 0 END) wins "
+        "FROM events WHERE kind='exit_pnl' AND ts > ?", (since,))[0]
+    realised, n_exit, wins = float(ex["pnl"] or 0), int(ex["n"] or 0), int(ex["wins"] or 0)
+    positions = state.positions()
+    marks, _ = marketdata.marks([p["asset_id"] for p in positions])
+    unreal, cost_open, blind = 0.0, 0.0, 0
+    for p in positions:
+        m = marks.get(p["asset_id"])
+        cost_open += p["cost_basis_usd"] or 0
+        if m:
+            unreal += m * p["qty"] - p["cost_basis_usd"]
+        else:
+            blind += 1
+    u = journal.query(
+        "SELECT COALESCE(SUM(json_extract(detail,'$.in')),0) i, "
+        "COALESCE(SUM(json_extract(detail,'$.out')),0) o, "
+        "COALESCE(SUM(json_extract(detail,'$.cache_read')),0) cr, "
+        "COALESCE(SUM(json_extract(detail,'$.cache_write')),0) cw, COUNT(*) n "
+        "FROM events WHERE kind='agent_usage' AND ts > ?", (since,))[0]
+    api = (u["i"] / 1e6 * config.PRICE_IN_PER_M + u["o"] / 1e6 * config.PRICE_OUT_PER_M
+           + u["cr"] / 1e6 * config.PRICE_CACHE_READ_PER_M
+           + u["cw"] / 1e6 * config.PRICE_CACHE_WRITE_PER_M)
+    net = realised + unreal - api
+    lines = [f"PNL {days}d",
+             f"Realised : ${realised:+.2f}  ({n_exit} exits, {wins} winners)",
+             f"Open     : ${unreal:+.2f}  on ${cost_open:.2f} in {len(positions)} position(s)"
+             + (f", {blind} unmarked" if blind else ""),
+             f"API cost : ${api:.2f}  ({u['n']} research calls)",
+             f"Net      : ${net:+.2f}"]
+    cash = sum(state.cash().values())
+    lines.append(f"Cash now : ${cash:.2f} across venues")
+    return "\n".join(lines)
+
+
 def score_text(arg=None):
     try:
         days = int(arg) if arg else 30
@@ -219,6 +263,7 @@ def main():
     cmds.score_text = score_text
     cmds.gaps_text = gaps_text
     cmds.signals_text = signals_text
+    cmds.pnl_text = pnl_text
     alerts.bind_sender(telegram.send)
     holder = {"p": telegram.Poller(cmds.handle)}
     holder["p"].start()

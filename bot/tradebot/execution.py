@@ -498,6 +498,10 @@ def execute_sell(asset_id, reason, fraction=1.0):
     sold_share = min(qty / held, 1.0) if held else 1.0
     cost_part = pos["cost_basis_usd"] * sold_share
     pnl = proceeds - cost_part
+    # One row per exit with the realised number: the PNL tally reads these.
+    journal.log_event("exit_pnl", asset_id, {
+        "pnl": round(pnl, 4), "proceeds": round(proceeds, 4), "cost": round(cost_part, 4),
+        "share": round(sold_share, 4), "reason": reason[:60]})
     if sold_share >= 0.999:
         # -$0.000001 from fee rounding is not a loss. The first Solana round
         # trip withdrew an approval over "exited at a loss ($-0.00)".

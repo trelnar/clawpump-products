@@ -7,7 +7,7 @@ from . import alerts, config, journal, state
 
 HELP = ("Unrecognized. Commands: YES <code>, NO <code>, REVOKE <asset>, STOP, "
         "FLATTEN, RESUME, STATUS, REPORT, SCORE [days], GAPS, SIGNALS [asset], "
-        "WHY <asset>, AUTO <hours> | AUTO OFF")
+        "WHY <asset>, PNL [days], AUTO <hours> | AUTO OFF")
 
 
 def new_code():
@@ -74,6 +74,9 @@ class Commands:
         elif cmd == "REVOKE" and arg:
             state.whitelist_revoke(arg)
             alerts.ops(f"Revoked {arg}. It will require approval again.")
+        elif cmd == "PNL":
+            alerts.ops(self.pnl_text(arg) if hasattr(self, "pnl_text")
+                       else "PNL unavailable.")
         elif cmd == "AUTO" and arg:
             self._auto(arg)
         elif cmd == "STATUS" and not arg:

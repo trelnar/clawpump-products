@@ -277,3 +277,31 @@ class AutoMode(Base):
         core.supervise_auto()
         core.supervise_auto()
         self.assertEqual(sum("expired" in s for s in self.said), 1)
+
+
+class PnlTally(Base):
+    def test_exit_logs_pnl_and_the_tally_sums_it(self):
+        from tradebot import core, journal
+        with journal._lock:
+            journal.conn().execute("DELETE FROM events WHERE kind IN ('exit_pnl','agent_usage')")
+            journal.conn().commit()
+        coinbase._products["PNL-USDC"] = {"quote_increment": "0.01",
+                                          "base_increment": "0.00000001"}
+        self.addCleanup(coinbase._products.clear)
+        state.upsert_position("cex:PNL-USDC", "coinbase", None, 2.0, 4.0)
+        state.set_cash("coinbase", 100.0)
+        self.patch(marketdata, "price", lambda a: 3.0)
+        self.patch(coinbase, "market_sell", lambda p, q: ("srv-p", {}))
+        self.patch(coinbase, "order_status", lambda o: {
+            "status": "FILLED", "filled_size": "2", "average_filled_price": "3",
+            "total_fees": "0.04", "filled_value": "6", "order_id": "srv-p"})
+        execution.execute_sell("cex:PNL-USDC", "test")          # +1.96 realised
+        journal.log_event("agent_usage", detail={"in": 1_000_000, "out": 0,
+                                                 "cache_read": 0, "cache_write": 0})  # $5
+        state.upsert_position("cex:OPEN-USDC", "coinbase", None, 1.0, 5.0)  # marks 3.0: -2
+        txt = core.pnl_text("7")
+        self.assertIn("Realised : $+1.96", txt)
+        self.assertIn("Open     : $-2.00", txt)
+        self.assertIn("API cost : $5.00", txt)
+        self.assertIn("Net      : $-5.04", txt)
+        state.close_position("cex:OPEN-USDC")
