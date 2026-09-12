@@ -24,34 +24,48 @@ def open_tracking(forecast_id, asset_id, action, price):
 
 
 def _rows():
-    return journal.query(
-        "SELECT * FROM forecast_tracking WHERE resolved=0 ORDER BY start_ts LIMIT ?",
-        (config.TRACK_BATCH,))
+    return journal.query("SELECT * FROM forecast_tracking WHERE resolved=0 ORDER BY start_ts DESC")
 
 
 def tick():
-    """One sampling pass. Cheap: it reuses marks the monitor already fetches."""
+    """One sampling pass.
+
+    Marks are fetched per distinct ASSET (many forecasts share one), youngest
+    forecasts first, so the 6h window is always covered. The first version
+    sampled the 60 OLDEST rows: at ~340 forecasts a day nothing was sampled
+    until it was 72h old, every outcome resolved at its start price (peak
+    1.00x, 0% everything), and that fed the model a calibration of 'none of
+    your passes ever moved' for two days."""
     rows = _rows()
     from . import ratchet
     pending = journal.query("SELECT DISTINCT asset_id FROM ratchet_track WHERE resolved=0")
-    assets = sorted({r["asset_id"] for r in rows} | {r["asset_id"] for r in pending})
-    if not assets:
+    assets, seen = [], set()
+    for r in rows:                              # youngest first, distinct
+        if r["asset_id"] not in seen:
+            seen.add(r["asset_id"])
+            assets.append(r["asset_id"])
+    assets = assets[:config.TRACK_BATCH]
+    for r in pending:
+        if r["asset_id"] not in seen:
+            assets.append(r["asset_id"])
+    if not assets and not rows:
         return 0
-    marks, _ = marketdata.marks(assets)
+    marks, _ = marketdata.marks(assets) if assets else ({}, True)
     now = time.time()
     ratchet.track(marks, now)
     updated = 0
-    for r in rows:
-        px = marks.get(r["asset_id"])
-        if px and px > 0:
-            in_window = now - r["start_ts"] <= config.P30_WINDOW_SEC
-            with journal._lock:
-                journal.conn().execute(
+    with journal._lock:
+        c = journal.conn()
+        for asset, px in marks.items():
+            if not px or px > 0:
+                c.execute(
                     "UPDATE forecast_tracking SET max_price=MAX(max_price,?), last_ts=?, "
-                    "max_6h=CASE WHEN ? THEN MAX(COALESCE(max_6h,0),?) ELSE max_6h END "
-                    "WHERE forecast_id=?", (px, now, int(in_window), px, r["forecast_id"]))
-                journal.conn().commit()
-            updated += 1
+                    "max_6h=CASE WHEN ? - start_ts <= ? THEN MAX(COALESCE(max_6h,0),?) "
+                    "ELSE max_6h END WHERE resolved=0 AND asset_id=?",
+                    (px, now, now, config.P30_WINDOW_SEC, px, asset))
+                updated += 1
+        c.commit()
+    for r in rows:
         if now - r["start_ts"] >= config.TRACK_WINDOW_SEC:
             _resolve(r["forecast_id"])
     return updated
@@ -63,6 +77,15 @@ def _resolve(forecast_id):
     if not r:
         return
     r = r[0]
+    if r["last_ts"] == r["start_ts"]:
+        # Never sampled: no outcome, or it scores as 'went nowhere' and
+        # poisons the model's calibration. Just close the row.
+        journal.log_event("track_unsampled", r["asset_id"], {"forecast_id": forecast_id})
+        with journal._lock:
+            journal.conn().execute(
+                "UPDATE forecast_tracking SET resolved=1 WHERE forecast_id=?", (forecast_id,))
+            journal.conn().commit()
+        return
     start, top = r["start_price"] or 0, r["max_price"] or 0
     mult = (top / start) if start > 0 else None
     top6 = r["max_6h"] if "max_6h" in r.keys() else None
@@ -79,6 +102,22 @@ def _resolve(forecast_id):
         journal.conn().execute(
             "UPDATE forecast_tracking SET resolved=1 WHERE forecast_id=?", (forecast_id,))
         journal.conn().commit()
+
+
+def purge_unsampled():
+    """One-time repair: outcomes written for forecasts that were never
+    sampled (peak exactly 1.00x, every hit 0) are not data. Remove them so
+    SCORE and the model's calibration see only real observations."""
+    with journal._lock:
+        c = journal.conn()
+        cur = c.execute(
+            "DELETE FROM outcomes WHERE forecast_id IN "
+            "(SELECT forecast_id FROM forecast_tracking WHERE last_ts = start_ts)")
+        n = cur.rowcount
+        c.commit()
+    if n:
+        journal.log_event("outcomes_purged_unsampled", detail={"rows": n})
+    return n
 
 
 def scorecard(days=30):

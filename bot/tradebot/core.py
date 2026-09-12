@@ -271,6 +271,7 @@ def main():
     state.init()
     from .signals import store as _sigstore
     _sigstore.init()    # SIGNALS in Telegram must answer before the agent's first pass
+    calibration.purge_unsampled()   # 2026-09-13: drop outcomes that were never observed
     # kv is durable: a stale marker must not let the watchdog lift the
     # cold-start SELL_ONLY that state.init() sets pending reconciliation.
     state.set_kv("halt_source", "")

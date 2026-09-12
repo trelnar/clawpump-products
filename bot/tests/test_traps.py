@@ -356,6 +356,52 @@ class P30Thesis(Base):
         self.assertAlmostEqual(state.get_position("cex:STP-USDC")["invalidation_price"], 1.9)
         state.close_position("cex:STP-USDC")
 
+    def test_unsampled_forecasts_produce_no_outcome_and_old_ones_are_purged(self):
+        from tradebot import calibration
+        with journal._lock:
+            journal.conn().execute("DELETE FROM outcomes")
+            journal.conn().execute("DELETE FROM forecast_tracking")
+            journal.conn().commit()
+        fid = journal.log_forecast({"asset_id": "solana:UNS", "action": "PASS", "p30": 0.1})
+        calibration.open_tracking(fid, "solana:UNS", "PASS", 1.0)
+        # a polluted outcome from the old tracker, never sampled
+        journal.log_outcome(forecast_id=fid, max_multiple=1.0, hit_30=0, hit_2x=0, hit_3x=0,
+                            hit_5x=0, hit_10x=0, exit_result="PASS", realized_pnl_usd=None,
+                            slippage_vs_plan=None)
+        self.assertEqual(calibration.purge_unsampled(), 1)
+        self.assertEqual(journal.query("SELECT COUNT(*) n FROM outcomes")[0]["n"], 0)
+        # resolving it without ever sampling writes no outcome
+        self.patch(calibration.marketdata, "marks", lambda a: ({}, False))
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 0)
+        calibration.tick()
+        self.assertEqual(journal.query("SELECT COUNT(*) n FROM outcomes")[0]["n"], 0)
+        self.assertEqual(journal.query("SELECT resolved FROM forecast_tracking WHERE forecast_id=?",
+                                       (fid,))[0]["resolved"], 1)
+
+    def test_tracker_samples_the_youngest_forecasts_first(self):
+        from tradebot import calibration
+        with journal._lock:
+            journal.conn().execute("DELETE FROM outcomes")
+            journal.conn().execute("DELETE FROM forecast_tracking")
+            journal.conn().commit()
+        self.patch(calibration.config, "TRACK_BATCH", 1)
+        old = journal.log_forecast({"asset_id": "solana:OLD", "action": "PASS"})
+        calibration.open_tracking(old, "solana:OLD", "PASS", 1.0)
+        with journal._lock:
+            journal.conn().execute("UPDATE forecast_tracking SET start_ts=start_ts-3600, "
+                                   "last_ts=last_ts-3600 WHERE forecast_id=?", (old,))
+            journal.conn().commit()
+        young = journal.log_forecast({"asset_id": "solana:YOUNG", "action": "PASS"})
+        calibration.open_tracking(young, "solana:YOUNG", "PASS", 1.0)
+        asked = []
+        self.patch(calibration.marketdata, "marks",
+                   lambda a: (asked.extend(a) or {x: 1.5 for x in a}, True))
+        calibration.tick()
+        self.assertEqual(asked, ["solana:YOUNG"])
+        r = {x["asset_id"]: x for x in journal.query("SELECT * FROM forecast_tracking")}
+        self.assertAlmostEqual(r["solana:YOUNG"]["max_price"], 1.5)
+        self.assertAlmostEqual(r["solana:OLD"]["max_price"], 1.0)
+
     def test_calibration_scores_plus30_inside_six_hours_only(self):
         from tradebot import calibration
         with journal._lock:
