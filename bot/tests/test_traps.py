@@ -429,3 +429,39 @@ class P30Thesis(Base):
         self.assertAlmostEqual(fb["stated_p30_mean"], 0.4)
         self.assertAlmostEqual(fb["reached_30pct_in_6h_share"], 1.0)
         self.assertIn("+30%/6h", calibration.scorecard(1))
+
+
+class PlainEnglish(Base):
+    def setUp(self):
+        super().setUp()
+        from tradebot import alerts
+        self.out = []
+        self.patch(alerts, "_send_fn", lambda body, buttons=None: self.out.append(body) or True)
+        alerts._symbol_cache.clear()
+        state.set_kv("symbol:cex:PLN-USDC", "")
+
+    def test_sell_reads_as_a_sentence_with_dollars(self):
+        from tradebot import alerts
+        alerts.sold("cex:PLN-USDC", 2.30, 0.23, "ratchet floor at 1.2", 0.75, 3.10)
+        self.assertEqual(self.out[-1], "I sold 75% of PLN for a gain of $2.30 (+23%) because "
+                                       "the run faded, so I banked it. Still holding about $3.10 of it.")
+        alerts.sold("cex:PLN-USDC", -1.50, -0.15, "invalidation 0.85 crossed at 0.84", 1.0, 0)
+        self.assertEqual(self.out[-1], "I sold PLN for a loss of $1.50 (-15%) because it hit the stop.")
+
+    def test_buy_names_the_stop(self):
+        from tradebot import alerts
+        alerts.bought("cex:PLN-USDC", 10.0, 2.0, 1.7, "I bank 75% once +20% holds.")
+        self.assertIn("I bought PLN for $10.00 at 2.", self.out[-1])
+        self.assertIn("stop at 1.7 (-15%)", self.out[-1])
+
+    def test_holding_lists_exits(self):
+        from tradebot import core
+        state.set_kv("symbol:cex:HLD-USDC", "HLD")
+        state.upsert_position("cex:HLD-USDC", "coinbase", None, 5.0, 10.0, invalidation=1.7)
+        self.patch(marketdata, "marks", lambda a: ({"cex:HLD-USDC": 2.2}, True))
+        txt = core.holding_text()
+        self.assertIn("HLD: $10.00 in, now +1.00 (+10%)", txt)
+        self.assertIn("stop at 1.7 (-15%)", txt)
+        self.assertIn("ratchet arms after +20%", txt)
+        state.close_position("cex:HLD-USDC")
+        self.assertTrue(core.holding_text().startswith("I'm not holding anything."))

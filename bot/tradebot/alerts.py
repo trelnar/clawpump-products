@@ -54,5 +54,78 @@ def sell_alert(asset, price, reason, pnl_pct=None):
     return _out("sell", f"SELL NOW {asset} @ {price}{p}\nReason: {reason}", asset_id=asset, force=True)
 
 
+# --- plain-English trade messages (operator request 2026-09-13) --------------
+_symbol_cache = {}
+
+
+def symbol(asset_id):
+    """A name a person recognises: the token's ticker, or the Coinbase base
+    currency. Cached in kv so a closed position still reads by name."""
+    if asset_id in _symbol_cache:
+        return _symbol_cache[asset_id]
+    from . import state
+    kind, _, ident = asset_id.partition(":")
+    sym = state.get_kv(f"symbol:{asset_id}")
+    if not sym:
+        if kind == "cex":
+            sym = ident.split("-")[0]
+        else:
+            try:
+                from . import marketdata
+                info = marketdata.dexscreener_token(kind, ident)
+                sym = (info or {}).get("base_symbol") or ""
+            except Exception:
+                sym = ""
+        sym = (sym or ident[:6]).strip()
+        state.set_kv(f"symbol:{asset_id}", sym)
+    _symbol_cache[asset_id] = sym
+    return sym
+
+
+def plain_reason(reason):
+    """Why a sell happened, in the operator's words."""
+    r = (reason or "").lower()
+    if "invalidation" in r:
+        return "it hit the stop"
+    if "ratchet take" in r:
+        return "it spiked and turned, so I took the profit"
+    if "ratchet floor" in r:
+        return "the run faded, so I banked it"
+    if "ratchet stall" in r:
+        return "it went cold, so I banked it"
+    if "standing plan" in r:
+        return "it reached the planned scale-out level"
+    if "agent sell" in r:
+        return "the research layer called the exit"
+    if "flatten" in r:
+        return "you asked me to flatten"
+    if "liquidity" in r:
+        return "the pool was draining"
+    return reason or "exit"
+
+
+def bought(asset, spent, price, stop, exits):
+    sym = symbol(asset)
+    stop_pct = f" ({(stop / price - 1):+.0%})" if (stop and price) else ""
+    body = (f"I bought {sym} for ${spent:.2f} at {price:.4g}.\n"
+            f"Exit plan: stop at {stop:.4g}{stop_pct}" if stop else
+            f"I bought {sym} for ${spent:.2f} at {price:.4g}.\nExit plan: no stop set")
+    if exits:
+        body += "; " + exits
+    return _out("action", body, asset_id=asset)
+
+
+def sold(asset, pnl_usd, pnl_pct, reason, fraction_sold, remaining_usd):
+    sym = symbol(asset)
+    verb = "a gain" if pnl_usd >= 0 else "a loss"
+    part = "" if fraction_sold >= 0.999 else f" {fraction_sold:.0%} of"
+    body = (f"I sold{part} {sym} for {verb} of ${abs(pnl_usd):.2f}"
+            + (f" ({pnl_pct:+.0%})" if pnl_pct is not None else "")
+            + f" because {plain_reason(reason)}.")
+    if fraction_sold < 0.999 and remaining_usd:
+        body += f" Still holding about ${remaining_usd:.2f} of it."
+    return _out("sell", body, asset_id=asset, force=True)
+
+
 def not_bought(asset, gate, measured):
     return _out("ops", f"NOT BOUGHT {asset}: {gate}, {measured}", asset_id=asset, force=True)

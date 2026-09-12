@@ -438,7 +438,8 @@ def execute_buy(ticket, ref_price):
     state.set_ticket_status(ticket["ticket_id"], "filled")
     journal.log_fill(client_oid=oid, asset_id=asset, side="buy", qty=qty,
                      price=fill_price, fee_usd=fee, venue=venue or chain, tx_ref=oid)
-    alerts.action_alert("BOUGHT", asset, fill_price, {"Size": f"${spent:.2f}"})
+    alerts.bought(asset, spent, fill_price, inv,
+                  "I bank 75% once +20% holds; the rest rides. Reviewed every 30 min.")
     return "filled"
 
 
@@ -540,8 +541,10 @@ def execute_sell(asset_id, reason, fraction=1.0):
                           {"requested": fraction, "sold_share": round(sold_share, 4)})
     journal.log_fill(client_oid=oid, asset_id=asset_id, side="sell", qty=qty,
                      price=price, fee_usd=fee, venue=venue or chain, tx_ref=oid)
-    alerts.sell_alert(asset_id, price, reason,
-                      pnl_pct=(pnl / cost_part) if cost_part else None)
+    left = state.get_position(asset_id)
+    remaining_usd = (left["qty"] * price) if (left and price) else 0.0
+    alerts.sold(asset_id, pnl, (pnl / cost_part) if cost_part else None, reason,
+                sold_share, remaining_usd)
     return "filled"
 
 

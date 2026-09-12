@@ -7,7 +7,8 @@ from . import alerts, config, journal, state
 
 HELP = ("Unrecognized. Commands: YES <code>, NO <code>, REVOKE <asset>, STOP, "
         "FLATTEN, RESUME, STATUS, REPORT, SCORE [days], GAPS, SIGNALS [asset], "
-        "WHY <asset>, PNL [days], RATCHET [days|LIVE|SHADOW|OFF], AUTO <hours> | AUTO OFF")
+        "WHY <asset>, HOLDING, PNL [days], RATCHET [days|LIVE|SHADOW|OFF], "
+        "AUTO <hours> | AUTO OFF")
 
 
 def new_code():
@@ -77,6 +78,9 @@ class Commands:
         elif cmd == "RATCHET":
             alerts.ops(self.ratchet_text(arg) if hasattr(self, "ratchet_text")
                        else "Ratchet report unavailable.")
+        elif cmd in ("HOLDING", "HOLDINGS") and not arg:
+            alerts.ops(self.holding_text() if hasattr(self, "holding_text")
+                       else "Holdings unavailable.")
         elif cmd == "PNL":
             alerts.ops(self.pnl_text(arg) if hasattr(self, "pnl_text")
                        else "PNL unavailable.")

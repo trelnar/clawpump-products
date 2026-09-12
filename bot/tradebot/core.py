@@ -30,6 +30,51 @@ def status_text():
     return "\n".join(lines)
 
 
+def holding_text():
+    """What I'm holding, in plain words, with how each one gets out."""
+    from . import alerts, ratchet
+    positions = state.positions()
+    if not positions:
+        cash = sum(state.cash().values())
+        return f"I'm not holding anything. Cash ${cash:.2f}."
+    marks, _ = marketdata.marks([p["asset_id"] for p in positions])
+    lines = [f"I'm holding {len(positions)} position(s):"]
+    for p in positions:
+        sym = alerts.symbol(p["asset_id"])
+        entry = (p["cost_basis_usd"] / p["qty"]) if p.get("qty") else None
+        m = marks.get(p["asset_id"])
+        if m and entry:
+            pnl = m * p["qty"] - p["cost_basis_usd"]
+            now = f"now {pnl:+.2f} ({m / entry - 1:+.0%})"
+        else:
+            now = "no price right now"
+        held_h = ((time.time() - p["entry_ts"]) / 3600) if p.get("entry_ts") else None
+        head = f"- {sym}: ${p['cost_basis_usd']:.2f} in, {now}"
+        if held_h is not None:
+            head += f", held {held_h:.1f}h"
+        lines.append(head)
+        exits = []
+        inv = p.get("invalidation_price")
+        if inv and entry:
+            exits.append(f"stop at {inv:.4g} ({inv / entry - 1:+.0%})")
+        rs = ratchet.summary(p["asset_id"])
+        if rs and entry:
+            if rs["share_remaining"]:
+                exits.append(f"ratchet armed, peak {rs['hwm'] / entry:.2f}x, "
+                             f"sells 75% below {rs['floor'] / entry:.2f}x")
+            else:
+                exits.append("ratchet already banked 75%; the rest rides on the stop")
+        else:
+            exits.append("ratchet arms after +20% holds 3 min, then banks 75% on the fade")
+        legs = (state.position_plan(p).get("profit_plan") or [])
+        for leg in legs:
+            if isinstance(leg, dict) and leg.get("multiple") and leg.get("sell_fraction"):
+                exits.append(f"plan: sell {leg['sell_fraction']:.0%} at {leg['multiple']}x")
+        exits.append("model reviews every 30 min")
+        lines.append("  Exits: " + "; ".join(exits))
+    return "\n".join(lines)
+
+
 def report_text(arg=None):
     day = time.time() - 86400
     f = journal.query("SELECT COUNT(*) c FROM forecasts WHERE ts>?", (day,))[0]["c"]
@@ -282,6 +327,7 @@ def main():
     cmds.gaps_text = gaps_text
     cmds.signals_text = signals_text
     cmds.pnl_text = pnl_text
+    cmds.holding_text = holding_text
     cmds.ratchet_text = ratchet_text
     alerts.bind_sender(telegram.send)
     holder = {"p": telegram.Poller(cmds.handle)}
