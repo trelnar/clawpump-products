@@ -134,6 +134,16 @@ REJECT_COOLDOWN_SEC = int(env("REJECT_COOLDOWN_SEC", str(24 * 3600)))  # a NO ho
 STOPOUT_COOLDOWN_SEC = int(env("STOPOUT_COOLDOWN_SEC", str(6 * 3600)))  # no re-entry after a losing exit
 AUTO_APPROVE_MAX_HOURS = int(env("AUTO_APPROVE_MAX_HOURS", "72"))   # AUTO <hours> ceiling
 
+# --- the thesis (operator, 2026-09-12): +30% within 6h -----------------------
+# The model forecasts p30 = P(+30% within P30_WINDOW_SEC). The core, not the
+# model's prose, decides: p30 >= BUY_P30_MIN is a BUY_NOW, below is not, and
+# every fill gets a stop at STOP_LOSS_PCT below entry unless the model's own
+# invalidation is tighter. 2:1 reward-to-risk that needs a one-in-three hit rate.
+P30_TARGET = float(env("P30_TARGET", "0.30"))
+P30_WINDOW_SEC = int(env("P30_WINDOW_SEC", str(6 * 3600)))
+BUY_P30_MIN = float(env("BUY_P30_MIN", "0.35"))
+STOP_LOSS_PCT = float(env("STOP_LOSS_PCT", "0.15"))
+
 # --- the ratchet (context-aware profit exit; see RATCHET.md) ---------------
 # off: nothing. shadow: compute, journal would-sells, never trade (the gate for
 # going live is the RATCHET report). live: sells the ratchet share.
@@ -194,7 +204,7 @@ TRACK_INTERVAL_SEC = 900
 RECON_POSITIONS_SEC = 1800       # position-vs-venue reconciliation
 POSITION_DRIFT_PCT = 0.02        # book vs venue mismatch worth alerting on
 TIME_STOP_SLACK = 1.5            # reassess at this multiple of the predicted window
-TIME_STOP_DEFAULT_SEC = 72 * 3600
+TIME_STOP_DEFAULT_SEC = 6 * 3600   # the thesis window (was 72h under the 2x thesis)
 LIQ_DRAIN_WARN = 0.30            # pool liquidity down vs entry -> urgent reeval
 LIQ_DRAIN_EXIT = 0.50            # -> exit evaluation, default exit
 

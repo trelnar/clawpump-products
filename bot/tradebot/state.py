@@ -49,7 +49,10 @@ def norm_asset(asset_id):
 def _migrate():
     """Additive column migrations. The DB outlives any single deploy."""
     for table, col, decl in (("tickets", "plan", "TEXT"),
-                             ("tickets", "sell_fraction", "REAL")):
+                             ("tickets", "sell_fraction", "REAL"),
+                             ("forecasts", "p30", "REAL"),
+                             ("outcomes", "hit_30", "INTEGER"),
+                             ("forecast_tracking", "max_6h", "REAL")):
         cols = {r["name"] for r in journal.query(f"PRAGMA table_info({table})")}
         if col not in cols:
             with journal._lock:

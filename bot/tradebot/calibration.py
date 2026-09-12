@@ -44,10 +44,12 @@ def tick():
     for r in rows:
         px = marks.get(r["asset_id"])
         if px and px > 0:
+            in_window = now - r["start_ts"] <= config.P30_WINDOW_SEC
             with journal._lock:
                 journal.conn().execute(
-                    "UPDATE forecast_tracking SET max_price=MAX(max_price,?), last_ts=? "
-                    "WHERE forecast_id=?", (px, now, r["forecast_id"]))
+                    "UPDATE forecast_tracking SET max_price=MAX(max_price,?), last_ts=?, "
+                    "max_6h=CASE WHEN ? THEN MAX(COALESCE(max_6h,0),?) ELSE max_6h END "
+                    "WHERE forecast_id=?", (px, now, int(in_window), px, r["forecast_id"]))
                 journal.conn().commit()
             updated += 1
         if now - r["start_ts"] >= config.TRACK_WINDOW_SEC:
@@ -63,7 +65,10 @@ def _resolve(forecast_id):
     r = r[0]
     start, top = r["start_price"] or 0, r["max_price"] or 0
     mult = (top / start) if start > 0 else None
+    top6 = r["max_6h"] if "max_6h" in r.keys() else None
+    m6 = (top6 / start) if (top6 and start > 0) else None
     journal.log_outcome(forecast_id=forecast_id, max_multiple=mult,
+                        hit_30=int(bool(m6 and m6 >= 1 + config.P30_TARGET)),
                         hit_2x=int(bool(mult and mult >= 2)),
                         hit_3x=int(bool(mult and mult >= 3)),
                         hit_5x=int(bool(mult and mult >= 5)),
@@ -83,7 +88,7 @@ def scorecard(days=30):
     since = time.time() - days * 86400
     rows = journal.query(
         "SELECT t.action a, COUNT(*) n, AVG(o.max_multiple) avg_mult, "
-        "SUM(o.hit_2x) h2, SUM(o.hit_3x) h3, SUM(o.hit_5x) h5 "
+        "SUM(o.hit_30) h30, SUM(o.hit_2x) h2, SUM(o.hit_3x) h3, SUM(o.hit_5x) h5 "
         "FROM outcomes o JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
         "WHERE o.ts > ? GROUP BY t.action ORDER BY n DESC", (since,))
     if not rows:
@@ -91,9 +96,9 @@ def scorecard(days=30):
     out = [f"SCORECARD {days}d — resolved forecasts by the action taken"]
     for r in rows:
         n = r["n"] or 1
-        out.append(f"{r['a'] or '?':10s} n={r['n']:4d}  avg peak {r['avg_mult'] or 0:.2f}x  "
-                   f"2x {100*(r['h2'] or 0)/n:4.0f}%  3x {100*(r['h3'] or 0)/n:4.0f}%  "
-                   f"5x {100*(r['h5'] or 0)/n:4.0f}%")
+        out.append(f"{r['a'] or '?':10s} n={r['n']:4d}  +30%/6h {100*(r['h30'] or 0)/n:4.0f}%  "
+                   f"peak {r['avg_mult'] or 0:.2f}x  2x {100*(r['h2'] or 0)/n:4.0f}%  "
+                   f"3x {100*(r['h3'] or 0)/n:4.0f}%")
     return "\n".join(out)
 
 
@@ -106,6 +111,7 @@ def feedback(days=14):
     since = time.time() - days * 86400
     rows = journal.query(
         "SELECT t.action a, COUNT(*) n, AVG(f.p2x) stated, AVG(o.hit_2x) hit2, "
+        "AVG(f.p30) stated30, AVG(o.hit_30) hit30, "
         "AVG(o.hit_3x) hit3, AVG(o.max_multiple) peak "
         "FROM outcomes o JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
         "JOIN forecasts f ON f.forecast_id=o.forecast_id "
@@ -116,6 +122,8 @@ def feedback(days=14):
             continue
         out[r["a"] or "?"] = {
             "resolved": r["n"],
+            "stated_p30_mean": round(r["stated30"] or 0, 3),
+            "reached_30pct_in_6h_share": round(r["hit30"] or 0, 3),
             "stated_p2x_mean": round(r["stated"] or 0, 3),
             "reached_2x_share": round(r["hit2"] or 0, 3),
             "reached_3x_share": round(r["hit3"] or 0, 3),

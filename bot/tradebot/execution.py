@@ -407,8 +407,13 @@ def execute_buy(ticket, ref_price):
             plan = json.loads(plan)
         except (TypeError, ValueError):
             plan = None
+    # The stop is set from the FILL, not from the research: STOP_LOSS_PCT below
+    # it, or the model's invalidation when that is tighter. Under the 2x thesis
+    # stops sat 30-40% down; the +30%/6h thesis needs 2:1.
+    stop = fill_price * (1 - config.STOP_LOSS_PCT) if fill_price else None
+    inv = max(ticket.get("invalidation_price") or 0, stop or 0) or None
     state.upsert_position(asset, venue, chain, qty, spent, entry_liq=entry_liq,
-                          invalidation=ticket.get("invalidation_price"), plan=plan)
+                          invalidation=inv, plan=plan)
     if plan and state.position_plan(asset) != plan:
         state.set_position_plan(asset, plan)  # an ADD carries a revised plan
     doubt = None

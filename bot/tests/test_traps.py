@@ -305,3 +305,78 @@ class PnlTally(Base):
         self.assertIn("API cost : $5.00", txt)
         self.assertIn("Net      : $-5.04", txt)
         state.close_position("cex:OPEN-USDC")
+
+
+class P30Thesis(Base):
+    """Operator amendment 2026-09-12: +30% within 6h; the number decides."""
+
+    def _submit(self, cand):
+        from tradebot.agent import runner
+        self.patch(marketdata, "marks", lambda a: ({}, True))
+        self.patch(marketdata, "price", lambda a: 1.0)
+        self.patch(state, "total_value", lambda m: 100.0)
+        from tradebot import risk
+        self.patch(risk, "compute_size", lambda v: 10.0)
+        self.patch(config, "BUY_P30_MIN", 0.35)
+        return runner.submit([cand])
+
+    def test_a_pass_with_high_p30_becomes_a_buy_ticket(self):
+        n = self._submit({"asset_id": "solana:P30A", "action": "PASS", "p30": 0.5, "p2x": 0.05,
+                          "confidence": 0.6, "what": "t"})
+        self.assertEqual(n, 1)
+        t = [x for x in state.tickets("new") if x["asset_id"] == "solana:P30A"]
+        self.assertEqual(t[-1]["action"], "BUY_NOW")
+        f = journal.query("SELECT action, p30 FROM forecasts WHERE asset_id='solana:P30A' "
+                          "ORDER BY ts DESC LIMIT 1")[0]
+        self.assertEqual((f["action"], f["p30"]), ("BUY_NOW", 0.5))
+
+    def test_a_buy_with_low_p30_does_not_buy(self):
+        n = self._submit({"asset_id": "solana:P30B", "action": "BUY_NOW", "p30": 0.2, "p2x": 0.3,
+                          "confidence": 0.9, "what": "t"})
+        self.assertEqual(n, 0)
+        self.assertEqual([x for x in state.tickets("new") if x["asset_id"] == "solana:P30B"], [])
+
+    def test_stop_is_set_from_the_fill_unless_the_model_is_tighter(self):
+        coinbase._products["STP-USDC"] = {"quote_increment": "0.01", "base_increment": "0.00000001"}
+        self.addCleanup(coinbase._products.clear)
+        self.patch(config, "STOP_LOSS_PCT", 0.15)
+        self.patch(coinbase, "best_price", lambda p: (1.99, 2.0))
+        self.patch(coinbase, "limit_buy", lambda p, n, l: ("srv-s", {}))
+        self.patch(coinbase, "order_status", lambda o: {
+            "status": "FILLED", "filled_size": "5", "average_filled_price": "2.0",
+            "total_fees": "0.02", "filled_value": "10", "order_id": "srv-s"})
+        state.set_cash("coinbase", 100.0)
+        loose = {"ticket_id": 901, "asset_id": "cex:STP-USDC", "venue": "coinbase", "chain": None,
+                 "notional_usd": 10.0, "ts": time.time(), "invalidation_price": 1.2}
+        self.assertEqual(execution.execute_buy(loose, 2.0), "filled")
+        self.assertAlmostEqual(state.get_position("cex:STP-USDC")["invalidation_price"], 1.7)
+        state.close_position("cex:STP-USDC")
+        tight = dict(loose, ticket_id=902, invalidation_price=1.9)
+        self.assertEqual(execution.execute_buy(tight, 2.0), "filled")
+        self.assertAlmostEqual(state.get_position("cex:STP-USDC")["invalidation_price"], 1.9)
+        state.close_position("cex:STP-USDC")
+
+    def test_calibration_scores_plus30_inside_six_hours_only(self):
+        from tradebot import calibration
+        with journal._lock:
+            journal.conn().execute("DELETE FROM outcomes")
+            journal.conn().execute("DELETE FROM forecast_tracking")
+            journal.conn().commit()
+        fid = journal.log_forecast({"asset_id": "solana:CAL30", "action": "PASS", "p30": 0.4})
+        calibration.open_tracking(fid, "solana:CAL30", "PASS", 1.0)
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:CAL30": 1.35}, True))
+        calibration.tick()                                   # +35% inside the window
+        with journal._lock:                                  # age the row past 6h, then 72h
+            journal.conn().execute("UPDATE forecast_tracking SET start_ts=start_ts-7*3600")
+            journal.conn().commit()
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:CAL30": 2.5}, True))
+        calibration.tick()                                   # 2.5x, but after 6h
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 0)
+        calibration.tick()
+        o = journal.query("SELECT * FROM outcomes WHERE forecast_id=?", (fid,))[0]
+        self.assertEqual(o["hit_30"], 1)
+        self.assertEqual(o["hit_2x"], 1)
+        fb = calibration.feedback()["PASS"]
+        self.assertAlmostEqual(fb["stated_p30_mean"], 0.4)
+        self.assertAlmostEqual(fb["reached_30pct_in_6h_share"], 1.0)
+        self.assertIn("+30%/6h", calibration.scorecard(1))

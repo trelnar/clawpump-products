@@ -42,6 +42,11 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   | Solana wallet `dHTaGtKmUiKHQfDqNo5Hom5WQ6u2SnnhjbEtMoBpoht` | $390 USDC + ~0.0965 SOL gas |
   | Base wallet `0x973813C36Fe55a5299cfa264eA296c69b6527Ca0` | $215 USDC + ~$10 ETH gas |
   | Stranded on Ethereum mainnet (same EVM address) | ~$5 USDC |
+- **The thesis is +30% within 6 hours** (operator amendment 2026-09-12; the 2x skill text
+  remains for context). The model reports `p30` per candidate; the core turns `p30 ≥ 0.35`
+  into BUY_NOW and anything below into not-a-buy, whatever the model wrote. Stops are set
+  15% below the fill unless the model's invalidation is tighter. `SCORE` reports the
+  +30%/6h hit rate per action and the model gets its p30 calibration every cycle.
 - **The ratchet** (`RATCHET.md`): a context-aware profit exit, in SHADOW since 2026-09-09.
   It arms after +20% has held for three 1-minute closes, and would sell 75% on a blow-off,
   floor breach or cold stall. `RATCHET` in Telegram reports the shadow gate; it trades only

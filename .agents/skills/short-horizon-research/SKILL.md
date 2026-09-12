@@ -5,6 +5,13 @@ description: Use this skill to discover, research, and rank assets with credible
 
 # Short-Horizon Trading Research
 
+> **Operator amendment, 2026-09-12.** The tradeable thesis is **+30% within 6 hours**.
+> The model reports `p30` for every candidate; the core buys at `p30 ≥ 0.35` and not
+> below, whatever action the model writes. Stops are set 15% below the fill (the model's
+> invalidation is used only if tighter); the ratchet banks 75% once +20% has held. The
+> 2× material below remains for context and for the `p2x` record, but where it differs
+> from this amendment, the amendment wins.
+
 ## Objective
 
 Find stocks and crypto assets with credible potential to increase **at least 2× within 1–3 days**.
