@@ -236,8 +236,8 @@ class AutoMode(Base):
         c = self._cmds()
         c.handle("AUTO 24")
         self.assertFalse(state.auto_approve_active())
-        code = [w for w in self.said[-1].split() if len(w) == 6 and w.isupper()
-                and w.isalnum()][-1]
+        import re
+        code = re.findall(r"\b[0-9A-F]{6}\b", self.said[-1])[-1]   # all-digit codes are valid too
         c.handle(f"YES {code}")
         self.assertTrue(state.auto_approve_active())
         self.patch(execution, "_run_gates", lambda t, v, f: 1.0)
@@ -383,6 +383,9 @@ class P30Thesis(Base):
         with journal._lock:
             journal.conn().execute("DELETE FROM outcomes")
             journal.conn().execute("DELETE FROM forecast_tracking")
+            journal.conn().commit()
+        with journal._lock:                                  # other modules leave shadow rows
+            journal.conn().execute("DELETE FROM ratchet_track")
             journal.conn().commit()
         self.patch(calibration.config, "TRACK_BATCH", 1)
         old = journal.log_forecast({"asset_id": "solana:OLD", "action": "PASS"})

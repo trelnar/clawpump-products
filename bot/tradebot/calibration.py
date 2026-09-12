@@ -14,12 +14,13 @@ from . import config, journal, marketdata
 def open_tracking(forecast_id, asset_id, action, price):
     if not forecast_id or price is None or price <= 0:
         return
+    now = time.time()      # one instant: last_ts == start_ts means 'never sampled'
     with journal._lock:
         journal.conn().execute(
             "INSERT OR IGNORE INTO forecast_tracking "
             "(forecast_id, asset_id, action, start_ts, start_price, max_price, last_ts) "
             "VALUES (?,?,?,?,?,?,?)",
-            (forecast_id, asset_id, action, time.time(), price, price, time.time()))
+            (forecast_id, asset_id, action, now, price, price, now))
         journal.conn().commit()
 
 
@@ -61,7 +62,8 @@ def tick():
                 c.execute(
                     "UPDATE forecast_tracking SET max_price=MAX(max_price,?), last_ts=?, "
                     "max_6h=CASE WHEN ? - start_ts <= ? THEN MAX(COALESCE(max_6h,0),?) "
-                    "ELSE max_6h END WHERE resolved=0 AND asset_id=?",
+                    "ELSE max_6h END, samples=COALESCE(samples,0)+1 "
+                    "WHERE resolved=0 AND asset_id=?",
                     (px, now, now, config.P30_WINDOW_SEC, px, asset))
                 updated += 1
         c.commit()
@@ -77,7 +79,7 @@ def _resolve(forecast_id):
     if not r:
         return
     r = r[0]
-    if r["last_ts"] == r["start_ts"]:
+    if _unsampled(r):
         # Never sampled: no outcome, or it scores as 'went nowhere' and
         # poisons the model's calibration. Just close the row.
         journal.log_event("track_unsampled", r["asset_id"], {"forecast_id": forecast_id})
@@ -104,6 +106,14 @@ def _resolve(forecast_id):
         journal.conn().commit()
 
 
+def _unsampled(r):
+    """Rows written before the samples column existed are judged by their
+    timestamps (never updated means last_ts is within a second of start_ts)."""
+    if r.keys() and "samples" in r.keys() and r["samples"] is not None:
+        return int(r["samples"]) == 0
+    return (r["last_ts"] or 0) - (r["start_ts"] or 0) < 1.0
+
+
 def purge_unsampled():
     """One-time repair: outcomes written for forecasts that were never
     sampled (peak exactly 1.00x, every hit 0) are not data. Remove them so
@@ -112,7 +122,8 @@ def purge_unsampled():
         c = journal.conn()
         cur = c.execute(
             "DELETE FROM outcomes WHERE forecast_id IN "
-            "(SELECT forecast_id FROM forecast_tracking WHERE last_ts = start_ts)")
+            "(SELECT forecast_id FROM forecast_tracking WHERE COALESCE(samples,0) = 0 "
+            "AND last_ts - start_ts < 1.0)")
         n = cur.rowcount
         c.commit()
     if n:
