@@ -226,7 +226,7 @@ def run_approved_tickets(value, fresh):
     for t in state.tickets("approved"):
         if t["action"] == "SHORT_NOW":
             from . import shorts
-            shorts.execute(t)
+            shorts.execute(t, approved=True)
             continue
         if execution.execute_approved(t, value, fresh) == "blocked":
             alerts.ops(f"{t['asset_id']} approved but conditions changed since the "
@@ -384,6 +384,7 @@ def main():
                     journal.log_event("shorts_monitor_error", detail=repr(e)[:200])
                 last["shorts"] = now
                 run_new_shorts()
+                _shorts.reconcile(now)
             if now - last["agentwatch"] >= config.AGENT_WATCHDOG_SEC:
                 supervise_agent()
                 supervise_auto()

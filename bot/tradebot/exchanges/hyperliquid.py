@@ -60,9 +60,10 @@ def sz_decimals(coin):
     return int(universe().get(coin, {}).get("szDecimals", 2))
 
 
-def round_size(coin, sz):
+def round_size(coin, sz, up=False):
     d = sz_decimals(coin)
-    return math.floor(sz * 10 ** d) / 10 ** d
+    f = math.ceil if up else math.floor
+    return f(sz * 10 ** d - 1e-9 if not up else sz * 10 ** d) / 10 ** d
 
 
 def mids():
@@ -139,11 +140,16 @@ def open_short(coin, notional_usd, slippage=None):
     px = mid(coin)
     if not px:
         raise RuntimeError(f"no mid for {coin}")
-    sz = round_size(coin, notional_usd / px)
-    if sz <= 0 or sz * px < config.HL_MIN_NOTIONAL_USD:
+    # Round UP: flooring a $10 order to szDecimals landed under the $10
+    # minimum on every coin, and the exchange evaluates the minimum at the
+    # slippage-adjusted price, so clear it with margin.
+    sz = round_size(coin, notional_usd / px, up=True)
+    if sz <= 0 or sz * px * (1 - slippage) < config.HL_MIN_NOTIONAL_USD:
         raise RuntimeError(f"size {sz} x {px} below the ${config.HL_MIN_NOTIONAL_USD} minimum")
     ex = exchange()
-    ex.update_leverage(config.HL_LEVERAGE, coin, True)
+    lev = ex.update_leverage(config.HL_LEVERAGE, coin, True)
+    if isinstance(lev, dict) and lev.get("status") != "ok":
+        raise RuntimeError(f"leverage not set: {str(lev)[:120]}")
     res = ex.market_open(coin, False, sz, None, slippage)
     filled, avg, oid = _parse(res)
     journal.log_event("hl_order", f"perp:{coin}", {"side": "short_open", "sz": filled, "px": avg,

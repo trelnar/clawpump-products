@@ -89,7 +89,7 @@ FORECAST_SCHEMA = {
                                "enum": ["BUY_NOW", "COMING_UP", "HOLD", "ADD",
                                         "SELL_NOW", "SHORT_NOW", "PASS"]},
                     "p30": {"type": "number",
-                            "description": "P(price reaches entry x 1.30 within 6 hours). The core buys at or above the threshold it is given; this number IS the decision."},
+                            "description": "P(the thesis move within 6 hours): +30% for buy candidates; for perp:<COIN> short candidates, P(it FALLS the stated target). The core acts at or above its threshold; this number IS the decision."},
                     "p2x": {"type": "number"},
                     "confidence": {"type": "number"},
                     "entry_price": {"type": "number"},

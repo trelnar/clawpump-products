@@ -49,6 +49,13 @@ class FakeHL:
         r = shorts.get(f"perp:{coin}")
         return r["qty"] if r else 0.0
 
+    def positions(self):
+        # mirror the book unless a test overrides self.live
+        if getattr(self, "live", None) is not None:
+            return self.live
+        return {r["coin"]: {"size": -r["qty"], "entry": r["entry_price"], "upnl": 0.0}
+                for r in shorts.open_positions()}
+
     def contexts(self):
         return {"ETH": {"mark": 2600.0, "prev_day": 2200.0, "volume_24h": 5e8, "funding": 0.0001,
                         "open_interest": 1e8, "sz_decimals": 4},
@@ -70,7 +77,7 @@ class Base(unittest.TestCase):
         self.patches = []
         self.fake = FakeHL()
         for name in ("mids", "mid", "account_value", "round_size", "open_short", "close_short",
-                     "contexts", "candles"):
+                     "contexts", "candles", "positions"):
             self.patch(hl, name, getattr(self.fake, name))
         self.patch(config, "SHORTS_ENABLED", True)
         state.set_mode("NORMAL", reason="test")     # a fresh DB cold-starts SELL_ONLY
@@ -163,6 +170,103 @@ class OpenAndCover(Base):
         self.assertIn("thesis window ran out", self.out[-1])
 
 
+class RatchetAndBook(Base):
+    def _open(self):
+        state.set_auto_approve(1)
+        shorts.process_ticket(self.ticket())
+
+    def _arm(self, t0):
+        for i in range(4):
+            self.fake.mid_px["ETH"] = 2600 * 0.94
+            shorts.monitor(t0 + i * 60)
+        r = shorts.get("perp:ETH")
+        self.assertTrue(json.loads(r["ratchet"])["armed"])
+        return r
+
+    def test_ceiling_sits_between_the_low_and_the_stop_and_a_further_fall_does_not_cover(self):
+        self._open()
+        t0 = time.time()
+        r = self._arm(t0)
+        rs = json.loads(r["ratchet"])
+        low = r["lwm"]
+        self.assertGreater(rs["ceiling"], low)
+        self.assertLessEqual(rs["ceiling"], r["stop_price"])
+        self.assertLess(r["stop_price"], 2600)
+        for i in range(5, 12):                       # keeps falling: no cover
+            self.fake.mid_px["ETH"] = 2600 * (0.94 - 0.005 * i)
+            shorts.monitor(t0 + i * 60)
+        self.assertEqual(self.fake.closed, [])
+        r = shorts.get("perp:ETH")
+        self.assertLess(r["lwm"], low)               # low water mark followed it down
+
+    def test_cover_failure_keeps_the_ratchet_budget(self):
+        self._open()
+        t0 = time.time()
+        self._arm(t0)
+
+        def boom(coin, sz=None):
+            raise RuntimeError("IoC not filled")
+        self.patch(hl, "close_short", boom)
+        self.fake.mid_px["ETH"] = 2600 * 0.94 * 1.05
+        shorts.monitor(t0 + 5 * 60)
+        shorts.monitor(t0 + 5 * 60 + 10)
+        rs = json.loads(shorts.get("perp:ETH")["ratchet"])
+        self.assertGreater(rs["budget"], 0)
+        self.assertFalse(rs["done"])
+        self.assertIn("COVER FAILED", self.out[-1])
+
+    def test_partial_cover_arithmetic_and_no_double_count_at_close(self):
+        self._open()
+        r0 = shorts.get("perp:ETH")
+        self.fake.mid_px["ETH"] = 2600 * 0.95
+        self.assertEqual(shorts.cover("perp:ETH", 0.5, "ratchet floor at x"), "filled")
+        r1 = shorts.get("perp:ETH")
+        self.assertAlmostEqual(r1["qty"], r0["qty"] - round(r0["qty"] * 0.5, 4), places=6)
+        self.assertAlmostEqual(r1["notional_usd"], r1["qty"] * r0["entry_price"], places=6)
+        self.fake.mid_px["ETH"] = 2600 * 1.01          # give a little back at the end
+        shorts.cover("perp:ETH", 1.0, "stop x hit")
+        self.assertIsNone(shorts.get("perp:ETH"))
+        rows = journal.query("SELECT detail FROM events WHERE kind='exit_pnl' AND asset_id='perp:ETH'")
+        total = sum(json.loads(x["detail"])["pnl"] for x in rows)
+        self.assertGreater(total, 0)                    # +5% on half beats -1% on half
+        self.assertTrue(state.is_whitelisted("perp:ETH"))   # a net win is not a loss
+
+    def test_row_without_an_exchange_position_is_dropped_once(self):
+        self._open()
+        self.fake.live = {}                              # closed in the UI
+        self.fake.mid_px["ETH"] = 2600 * 1.10            # stop would fire
+        shorts.monitor()
+        self.assertIsNone(shorts.get("perp:ETH"))
+        self.assertEqual(self.fake.closed, [])
+        self.assertIn("no longer on Hyperliquid", self.out[-1])
+        n = len(self.out)
+        shorts.monitor()
+        self.assertEqual(len(self.out), n)               # nothing more to say
+
+    def test_reconcile_adopts_an_exchange_short_with_no_row(self):
+        self.fake.live = {"WIF": {"size": -5.0, "entry": 2.0, "upnl": 0.0}}
+        shorts._last_recon[0] = 0
+        shorts.reconcile(time.time())
+        r = shorts.get("perp:WIF")
+        self.assertIsNotNone(r)
+        self.assertAlmostEqual(r["stop_price"], 2.0 * 1.04)
+        self.assertIn("adopted it", self.out[-1])
+
+    def test_approved_ticket_older_than_the_age_gate_still_opens(self):
+        t = self.ticket()
+        with journal._lock:
+            journal.conn().execute("UPDATE tickets SET ts=ts-1500 WHERE ticket_id=?", (t["ticket_id"],))
+            journal.conn().commit()
+        t = dict(t, ts=t["ts"] - 1500)
+        self.assertEqual(shorts.execute(t, approved=True), "filled")
+        self.assertEqual(shorts.execute(dict(t, ticket_id=999), approved=True), "blocked")  # already short
+        self.assertIn("approved but not opened", self.out[-1])
+
+    def test_second_question_on_the_same_asset_is_not_asked(self):
+        self.assertEqual(shorts.process_ticket(self.ticket()), "awaiting_approval")
+        self.assertEqual(shorts.process_ticket(self.ticket()), "blocked")
+
+
 class Discovery(Base):
     def test_candidates_are_pumpers_with_volume(self):
         c = shorts.candidates()
@@ -175,14 +279,19 @@ class Discovery(Base):
         from tradebot.agent import runner
         self.patch(marketdata, "marks", lambda a: ({}, True))
         self.patch(state, "total_value", lambda m: 100.0)
-        n = runner.submit([{"asset_id": "perp:WIF", "action": "PASS", "p30": 0.6, "p2x": 0,
+        n = runner.submit([{"asset_id": "perp:WIF", "action": "SHORT_NOW", "p30": 0.6, "p2x": 0,
                             "confidence": 0.5, "what": "t"},
                            {"asset_id": "perp:ETH", "action": "SHORT_NOW", "p30": 0.1, "p2x": 0,
-                            "confidence": 0.5, "what": "t"}])
+                            "confidence": 0.5, "what": "t"},
+                           {"asset_id": "perp:SOL", "action": "BUY_NOW", "p30": 0.9, "p2x": 0,
+                            "confidence": 0.5, "what": "keeps pumping"}])
         self.assertEqual(n, 1)
         acts = {t["asset_id"]: t["action"] for t in state.tickets("new")}
         self.assertEqual(acts.get("perp:WIF"), "SHORT_NOW")
         self.assertNotIn("perp:ETH", acts)
+        self.assertNotIn("perp:SOL", acts)          # a bullish perp call is never shorted
+        t = [x for x in state.tickets("new") if x["asset_id"] == "perp:WIF"][0]
+        self.assertAlmostEqual(t["notional_usd"], config.HL_ORDER_USD)
 
 
 class CalibrationLow(Base):

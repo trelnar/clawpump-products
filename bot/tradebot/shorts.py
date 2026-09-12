@@ -16,6 +16,7 @@ squeeze costs the stop, never the account.
 """
 import json
 import math
+import threading
 import time
 
 from . import alerts, config, journal, state
@@ -24,6 +25,9 @@ from .exchanges import hyperliquid as hl
 
 def enabled():
     return bool(config.SHORTS_ENABLED)
+
+
+_cover_lock = threading.RLock()     # FLATTEN (poller thread) vs monitor (core loop)
 
 
 def asset_id(coin):
@@ -116,7 +120,7 @@ def candidates(limit=None):
         out.append({
             "asset_id": asset_id(coin), "coin": coin, "side": "short", "venue": "hyperliquid",
             "price": c["mark"], "chg24": round(chg24, 4), "chg1h": round(chg1h, 4),
-            "chg6h": round(chg6h, 4), "off_high_24h": round(c["mark"] / hi24 - 1, 4) if hi24 else None,
+            "chg6h": round(chg6h, 4), "off_high_8h": round(c["mark"] / hi24 - 1, 4) if hi24 else None,
             "funding_hourly": c["funding"], "volume_24h": round(c["volume_24h"]),
             "open_interest": round(c["open_interest"]),
             "candles_1h": [[x["h"], x["l"], x["c"], x["v"]] for x in cs[-8:]],
@@ -129,15 +133,15 @@ def candidates(limit=None):
 
 
 # --- opening ------------------------------------------------------------------------
-def _gate(ticket):
+def _gate(ticket, ignore_age=False):
     """Reasons not to open. Returns None when clear."""
     asset = ticket["asset_id"]
     if state.get_mode() != "NORMAL":
         return f"halt: {state.get_mode()}"
-    if time.time() - ticket["ts"] > config.TICKET_MAX_AGE_SEC:
-        return "stale_ticket"
     if get(asset):
         return "already_short"
+    if not ignore_age and time.time() - ticket["ts"] > config.TICKET_MAX_AGE_SEC:
+        return "stale_ticket"
     if len(open_positions()) >= config.HL_MAX_OPEN:
         return "max_shorts"
     for fn, name in ((state.rejected_recently, "rejected_cooldown"),
@@ -148,8 +152,10 @@ def _gate(ticket):
         av = hl.account_value()
     except Exception as e:
         return f"account_unreadable: {str(e)[:60]}"
-    if av < ticket["notional_usd"] * config.HL_MARGIN_BUFFER:
-        return f"margin: ${av:.2f} on Hyperliquid, need ${ticket['notional_usd'] * config.HL_MARGIN_BUFFER:.2f}"
+    committed = sum(r["notional_usd"] for r in open_positions())
+    need = ticket["notional_usd"] * config.HL_MARGIN_BUFFER
+    if av - committed < need:
+        return f"margin: ${av - committed:.2f} free on Hyperliquid, need ${need:.2f}"
     return None
 
 
@@ -168,6 +174,10 @@ def process_ticket(ticket):
             state.whitelist_add(asset, "hyperliquid")
             journal.log_event("auto_approved", asset, {"short": True})
         return execute(ticket)
+    if journal.query("SELECT 1 FROM pending_approvals WHERE status='pending' AND asset_id=? "
+                     "AND expires > ?", (asset, time.time())):
+        state.set_ticket_status(ticket["ticket_id"], "blocked:already_asked")
+        return "blocked"       # one open question per asset; two taps would open two shorts
     from . import approval
     code = approval.new_code()
     state.add_pending(code, "short", asset, ticket["ticket_id"], config.APPROVAL_EXPIRY_SEC)
@@ -178,16 +188,24 @@ def process_ticket(ticket):
     return "awaiting_approval"
 
 
-def execute(ticket):
+def execute(ticket, approved=False):
+    """Open. On the approved path the tap is the freshness signal, so the
+    ticket-age gate is skipped; everything else still applies."""
     asset, coin = ticket["asset_id"], coin_of(ticket["asset_id"])
-    why = _gate(ticket)
-    if why and not why.startswith("already_short"):
+    why = _gate(ticket, ignore_age=approved)
+    if why:
         state.set_ticket_status(ticket["ticket_id"], f"blocked:{why.split(':')[0]}")
+        if approved:
+            alerts.ops(f"{alerts.symbol(asset)} short approved but not opened: {why}.")
         return "blocked"
     try:
         sz, px, oid = hl.open_short(coin, ticket["notional_usd"])
     except Exception as e:
         journal.log_event("short_failed", asset, str(e)[:200])
+        # The order may have landed before the error: the exchange is the fact.
+        if _adopt_orphan(coin, "open error"):
+            state.set_ticket_status(ticket["ticket_id"], "filled")
+            return "filled"
         state.set_ticket_status(ticket["ticket_id"], "failed")
         alerts.ops(f"Short of {coin} failed: {str(e)[:120]}")
         return "failed"
@@ -206,15 +224,37 @@ def execute(ticket):
 
 # --- covering -----------------------------------------------------------------------
 def cover(asset, fraction, reason):
+    with _cover_lock:
+        return _cover(asset, fraction, reason)
+
+
+def _cover(asset, fraction, reason):
     r = get(asset)
     if not r:
         return "no_position"
     coin = r["coin"]
-    sz = r["qty"] if fraction >= 0.999 else hl.round_size(coin, r["qty"] * fraction)
-    if sz <= 0:
-        return "dust"
+    # The exchange is the fact. A row with no position behind it (closed in
+    # the UI, dust, a crash between fill and write) must not become a
+    # COVER FAILED alert every 10 seconds.
     try:
-        filled, px, oid = hl.close_short(coin, None if fraction >= 0.999 else sz)
+        pos = hl.positions()
+    except Exception as e:
+        journal.log_event("hl_positions_fail", asset, str(e)[:120])
+        pos = None
+    live = pos.get(coin) if pos is not None else None
+    if pos is not None and (live is None or live["size"] >= 0):
+        journal.log_event("short_gone", asset, {"book_qty": r["qty"], "exchange": live["size"]})
+        _delete(asset)
+        alerts.ops(f"My {coin} short is no longer on Hyperliquid; I've dropped it from the book.")
+        return "gone"
+    full = fraction >= 0.999
+    sz = None
+    if not full:
+        sz = hl.round_size(coin, r["qty"] * fraction)
+        if sz <= 0 or (r["qty"] - sz) * (live["entry"] if live else r["entry_price"]) < 1.0:
+            full, sz = True, None            # a dust remainder is not worth an orphan
+    try:
+        filled, px, oid = hl.close_short(coin, sz)
     except Exception as e:
         journal.log_event("cover_failed", asset, str(e)[:200])
         alerts.ops(f"COVER FAILED {coin}: {str(e)[:120]}. Short still open; check Hyperliquid.")
@@ -223,16 +263,17 @@ def cover(asset, fraction, reason):
     pnl = (r["entry_price"] - px) * filled - fee
     cost = r["entry_price"] * filled
     share = min(filled / r["qty"], 1.0) if r["qty"] else 1.0
+    prior = _life_pnl(asset, r["entry_ts"])       # BEFORE this exit's own row
     journal.log_event("exit_pnl", asset, {"pnl": round(pnl, 4), "proceeds": round(cost + pnl, 4),
                                           "cost": round(cost, 4), "share": round(share, 4),
                                           "reason": reason[:60], "short": True})
     journal.log_fill(client_oid=str(oid), asset_id=asset, side="cover", qty=filled, price=px,
                      fee_usd=round(fee, 4), venue="hyperliquid", tx_ref=str(oid))
     remaining = r["qty"] - filled
-    if share >= 0.999 or remaining * px < 1.0:
+    if full or share >= 0.999 or remaining <= 0:
         _delete(asset)
-        prior = _life_pnl(asset, r["entry_ts"]) + pnl
-        if config.WHITELIST_REAPPROVE_AFTER_LOSS and prior < -config.LOSS_THRESHOLD_USD:
+        total = prior + pnl
+        if config.WHITELIST_REAPPROVE_AFTER_LOSS and total < -config.LOSS_THRESHOLD_USD:
             state.whitelist_revoke(asset)
             state.note_stopout(asset)
         remaining_usd = 0.0
@@ -340,16 +381,75 @@ def monitor(now=None):
         fired = _tick_ratchet(r, rs, price, now)
         if fired and rs["budget"] > 0:
             frac = min(rs["budget"] / r["qty"], 1.0) if r["qty"] else 0
-            rs["budget"], rs["done"] = 0.0, True
             r["ratchet"] = json.dumps(rs)
             _write(r)
-            cover(r["asset_id"], frac, f"ratchet {fired} at {price:.4g}")
+            before = r["qty"]
+            res = cover(r["asset_id"], frac, f"ratchet {fired} at {price:.4g}")
+            after = get(r["asset_id"])
+            if res in ("filled", "gone", "no_position"):
+                if after:                     # partial fill keeps the rest of the budget
+                    rs2 = json.loads(after["ratchet"] or "{}")
+                    sold = before - after["qty"]
+                    rs2["budget"] = max(0.0, rs["budget"] - sold)
+                    rs2["done"] = rs2["budget"] <= 0
+                    after = dict(after)
+                    after["ratchet"] = json.dumps(rs2)
+                    _write(after)
             continue
         r["ratchet"] = json.dumps(rs)
         _write(r)
         if now - r["entry_ts"] >= config.HL_MAX_HOLD_SEC:
             journal.log_event("short_max_hold", r["asset_id"], {"hours": round((now - r["entry_ts"]) / 3600, 1)})
             cover(r["asset_id"], 1.0, "held past the thesis window")
+
+
+def _adopt_orphan(coin, why):
+    """A short on the exchange with no row: give it a stop and a row."""
+    try:
+        live = hl.positions().get(coin)
+    except Exception:
+        return False
+    if not live or live["size"] >= 0 or get(asset_id(coin)):
+        return False
+    qty, px = abs(live["size"]), live["entry"] or (hl.mid(coin) or 0)
+    if not px:
+        return False
+    now = time.time()
+    _write({"asset_id": asset_id(coin), "coin": coin, "qty": qty, "entry_price": px,
+            "notional_usd": qty * px, "entry_ts": now, "stop_price": px * (1 + config.HL_STOP_PCT),
+            "ratchet": json.dumps(_new_ratchet()), "lwm": px, "last_alert_ts": now})
+    journal.log_event("short_adopted", asset_id(coin), {"qty": qty, "entry": px, "why": why})
+    alerts.ops(f"Found a {coin} short on Hyperliquid that wasn't in my book ({why}); adopted it "
+               f"with a stop at {px * (1 + config.HL_STOP_PCT):.4g}.")
+    return True
+
+
+_last_recon = [0.0]
+
+
+def reconcile(now=None):
+    """Both directions, every RECON_POSITIONS_SEC: exchange shorts with no
+    row get adopted; rows with no exchange position get dropped."""
+    if not enabled():
+        return
+    now = now or time.time()
+    if now - _last_recon[0] < config.RECON_POSITIONS_SEC:
+        return
+    _last_recon[0] = now
+    try:
+        live = hl.positions()
+    except Exception as e:
+        journal.log_event("hl_positions_fail", detail=str(e)[:120])
+        return
+    for coin, p in live.items():
+        if p["size"] < 0 and not get(asset_id(coin)):
+            _adopt_orphan(coin, "reconcile")
+    for r in open_positions():
+        p = live.get(r["coin"])
+        if p is None or p["size"] >= 0:
+            journal.log_event("short_gone", r["asset_id"], {"book_qty": r["qty"]})
+            _delete(r["asset_id"])
+            alerts.ops(f"My {r['coin']} short is no longer on Hyperliquid; dropped it from the book.")
 
 
 def summary_lines(marks_):

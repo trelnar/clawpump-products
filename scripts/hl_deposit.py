@@ -48,10 +48,12 @@ def main():
     if eth < 0.0002:
         print("no ETH on Arbitrum for gas; send ~$2 of ETH (Arbitrum network) first")
         return 1
-    tx = usdc.functions.transfer(Web3.to_checksum_address(BRIDGE), int(amount * 1e6)).build_transaction({
-        "from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address),
-        "gas": 120000, "maxFeePerGas": w3.eth.gas_price * 2, "maxPriorityFeePerGas": 0,
-        "chainId": 42161})
+    fn = usdc.functions.transfer(Web3.to_checksum_address(BRIDGE), int(amount * 1e6))
+    base = {"from": acct.address, "nonce": w3.eth.get_transaction_count(acct.address),
+            "maxFeePerGas": w3.eth.gas_price * 2, "maxPriorityFeePerGas": 0, "chainId": 42161}
+    # Arbitrum folds L1 calldata cost into gas units; a fixed number runs out
+    gas = int(fn.estimate_gas({"from": acct.address}) * 1.3)
+    tx = fn.build_transaction({**base, "gas": gas})
     signed = acct.sign_transaction(tx)
     h = w3.eth.send_raw_transaction(signed.raw_transaction)
     print("sent", w3.to_hex(h), "-- waiting for the receipt")
