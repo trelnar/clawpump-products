@@ -67,7 +67,7 @@ def symbol(asset_id):
     kind, _, ident = asset_id.partition(":")
     sym = state.get_kv(f"symbol:{asset_id}")
     if not sym:
-        if kind == "cex":
+        if kind in ("cex", "perp"):
             sym = ident.split("-")[0]
         else:
             try:
@@ -113,6 +113,31 @@ def bought(asset, spent, price, stop, exits):
     if exits:
         body += "; " + exits
     return _out("action", body, asset_id=asset)
+
+
+def shorted(asset, notional, price, stop):
+    sym = symbol(asset)
+    body = (f"I shorted {sym} for ${notional:.2f} at {price:.4g} (1x).\n"
+            f"Exit plan: stop at {stop:.4g} ({stop / price - 1:+.0%}); I cover 75% once "
+            f"-{config.HL_ARM_PCT:.0%} holds and it bounces; out at {config.HL_MAX_HOLD_SEC // 3600}h regardless.")
+    return _out("action", body, asset_id=asset)
+
+
+def covered(asset, pnl_usd, pnl_pct, reason, fraction, remaining_usd):
+    sym = symbol(asset)
+    verb = "a gain" if pnl_usd >= 0 else "a loss"
+    part = "" if fraction >= 0.999 else f" {fraction:.0%} of"
+    r = (reason or "").lower()
+    why = ("it hit the stop" if "stop" in r else
+           "it bounced off the low, so I banked it" if "ratchet floor" in r else
+           "it capitulated and turned, so I took the profit" if "ratchet take" in r else
+           "the thesis window ran out" if "window" in r else
+           "you asked me to flatten" if "flatten" in r else reason)
+    body = (f"I covered{part} my {sym} short for {verb} of ${abs(pnl_usd):.2f}"
+            + (f" ({pnl_pct:+.0%})" if pnl_pct is not None else "") + f" because {why}.")
+    if fraction < 0.999 and remaining_usd:
+        body += f" Still short about ${remaining_usd:.2f} of it."
+    return _out("sell", body, asset_id=asset, force=True)
 
 
 def sold(asset, pnl_usd, pnl_pct, reason, fraction_sold, remaining_usd):

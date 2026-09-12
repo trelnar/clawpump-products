@@ -33,12 +33,14 @@ def status_text():
 def holding_text():
     """What I'm holding, in plain words, with how each one gets out."""
     from . import alerts, ratchet
+    from . import shorts
     positions = state.positions()
-    if not positions:
+    short_lines = shorts.summary_lines(shorts.marks()) if shorts.enabled() else []
+    if not positions and not short_lines:
         cash = sum(state.cash().values())
         return f"I'm not holding anything. Cash ${cash:.2f}."
     marks, _ = marketdata.marks([p["asset_id"] for p in positions])
-    lines = [f"I'm holding {len(positions)} position(s):"]
+    lines = [f"I'm holding {len(positions) + len(short_lines)} position(s):"] + short_lines
     for p in positions:
         sym = alerts.symbol(p["asset_id"])
         entry = (p["cost_basis_usd"] / p["qty"]) if p.get("qty") else None
@@ -116,6 +118,12 @@ def pnl_text(arg=None):
     api = (u["i"] / 1e6 * config.PRICE_IN_PER_M + u["o"] / 1e6 * config.PRICE_OUT_PER_M
            + u["cr"] / 1e6 * config.PRICE_CACHE_READ_PER_M
            + u["cw"] / 1e6 * config.PRICE_CACHE_WRITE_PER_M)
+    from . import shorts
+    if shorts.enabled():
+        su = shorts.unrealised(shorts.marks())
+        unreal += su
+        cost_open += sum(r["notional_usd"] for r in shorts.open_positions())
+        positions = positions + shorts.open_positions()
     net = realised + unreal - api
     lines = [f"PNL {days}d",
              f"Realised : ${realised:+.2f}  ({n_exit} exits, {wins} winners)",
@@ -202,10 +210,24 @@ def on_approved_buy(pending):
     journal.log_event("buy_approved_queued", detail=str(pending["ticket_id"]))
 
 
+def run_new_shorts():
+    from . import shorts
+    for t in state.tickets("new"):
+        if t["action"] == "SHORT_NOW":
+            if shorts.enabled():
+                shorts.process_ticket(t)
+            else:
+                state.set_ticket_status(t["ticket_id"], "blocked:shorts_off")
+
+
 def run_approved_tickets(value, fresh):
     """Core-loop side of an approval. Gates 1-4 run here against the state at
     execution time, which may be minutes and one STOP later than the tap."""
     for t in state.tickets("approved"):
+        if t["action"] == "SHORT_NOW":
+            from . import shorts
+            shorts.execute(t)
+            continue
         if execution.execute_approved(t, value, fresh) == "blocked":
             alerts.ops(f"{t['asset_id']} approved but conditions changed since the "
                        "alert. Not bought. It stays approved and will auto-buy if it "
@@ -321,7 +343,13 @@ def main():
     # cold-start SELL_ONLY that state.init() sets pending reconciliation.
     state.set_kv("halt_source", "")
     journal.log_event("core_start")
-    cmds = approval.Commands(on_approved_buy, execution.flatten_all,
+    def flatten_everything():
+        from . import shorts as _shorts
+        out = execution.flatten_all()
+        out.update(_shorts.flatten())
+        return out
+
+    cmds = approval.Commands(on_approved_buy, flatten_everything,
                              status_text, report_text, why_text)
     cmds.score_text = score_text
     cmds.gaps_text = gaps_text
@@ -348,6 +376,14 @@ def main():
             if now - last["monitor"] >= config.MONITOR_INTERVAL_TOKEN_SEC:
                 monitor.check_positions()
                 last["monitor"] = now
+            if now - last.get("shorts", 0) >= config.HL_MONITOR_SEC:
+                from . import shorts as _shorts
+                try:
+                    _shorts.monitor(now)
+                except Exception as e:
+                    journal.log_event("shorts_monitor_error", detail=repr(e)[:200])
+                last["shorts"] = now
+                run_new_shorts()
             if now - last["agentwatch"] >= config.AGENT_WATCHDOG_SEC:
                 supervise_agent()
                 supervise_auto()

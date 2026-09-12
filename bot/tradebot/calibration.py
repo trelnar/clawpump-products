@@ -62,9 +62,12 @@ def tick():
                 c.execute(
                     "UPDATE forecast_tracking SET max_price=MAX(max_price,?), last_ts=?, "
                     "max_6h=CASE WHEN ? - start_ts <= ? THEN MAX(COALESCE(max_6h,0),?) "
-                    "ELSE max_6h END, samples=COALESCE(samples,0)+1 "
+                    "ELSE max_6h END, "
+                    "min_price=MIN(COALESCE(min_price,start_price),?), "
+                    "min_6h=CASE WHEN ? - start_ts <= ? THEN MIN(COALESCE(min_6h,start_price),?) "
+                    "ELSE min_6h END, samples=COALESCE(samples,0)+1 "
                     "WHERE resolved=0 AND asset_id=?",
-                    (px, now, now, config.P30_WINDOW_SEC, px, asset))
+                    (px, now, now, config.P30_WINDOW_SEC, px, px, now, config.P30_WINDOW_SEC, px, asset))
                 updated += 1
         c.commit()
     for r in rows:
@@ -92,8 +95,14 @@ def _resolve(forecast_id):
     mult = (top / start) if start > 0 else None
     top6 = r["max_6h"] if "max_6h" in r.keys() else None
     m6 = (top6 / start) if (top6 and start > 0) else None
+    if (r["asset_id"] or "").startswith("perp:"):
+        # a short thesis scores on the LOW inside the window
+        low6 = r["min_6h"] if "min_6h" in r.keys() else None
+        hit30 = int(bool(low6 and start > 0 and low6 / start <= 1 - config.HL_TARGET))
+    else:
+        hit30 = int(bool(m6 and m6 >= 1 + config.P30_TARGET))
     journal.log_outcome(forecast_id=forecast_id, max_multiple=mult,
-                        hit_30=int(bool(m6 and m6 >= 1 + config.P30_TARGET)),
+                        hit_30=hit30,
                         hit_2x=int(bool(mult and mult >= 2)),
                         hit_3x=int(bool(mult and mult >= 3)),
                         hit_5x=int(bool(mult and mult >= 5)),

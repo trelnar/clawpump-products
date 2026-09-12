@@ -95,6 +95,9 @@ def price(asset_id):
     try:
         if kind == "cex":
             p = coinbase_spot(ident)
+        elif kind == "perp":
+            from .exchanges import hyperliquid as hl
+            p = hl.mid(ident)
         else:
             info = dexscreener_token(kind, ident)
             p = info["price"] if info else None

@@ -89,6 +89,10 @@ def gather():
             c["candles_1h"] = marketdata.compact_candles(rows, keep=60)
             c["candles_note"] = "[high, low, close, volume] oldest-first, 1h"
 
+    from .. import shorts
+    for c in shorts.candidates():
+        c["signals"] = signals.features(c["asset_id"])
+        enriched.append(c)
     for m in marketdata.coinbase_movers():
         journal.log_discovery(f"cex:{m['product']}", m["source"], m["raw"])
         if len(enriched) < config.AGENT_MAX_CANDIDATES + 5:
@@ -248,7 +252,15 @@ def submit(cands):
     for c in cands[:MAX_CANDIDATES_PER_CYCLE]:
         # The number decides, not the prose (operator amendment 2026-09-12).
         p30 = c.get("p30")
-        if p30 is not None and c["action"] in ("PASS", "COMING_UP") and p30 >= config.BUY_P30_MIN:
+        is_perp = str(c.get("asset_id", "")).startswith("perp:")
+        if is_perp:
+            want = p30 is not None and p30 >= config.BUY_P30_MIN
+            if want and c["action"] != "SHORT_NOW":
+                journal.log_event("p30_promoted", c["asset_id"], {"from": c["action"], "p30": p30, "short": True})
+            elif not want and c["action"] == "SHORT_NOW":
+                journal.log_event("p30_demoted", c["asset_id"], {"p30": p30, "short": True})
+            c["action"] = "SHORT_NOW" if want else "PASS"
+        elif p30 is not None and c["action"] in ("PASS", "COMING_UP") and p30 >= config.BUY_P30_MIN:
             journal.log_event("p30_promoted", c["asset_id"], {"from": c["action"], "p30": p30})
             c["action"] = "BUY_NOW"
         elif p30 is not None and c["action"] == "BUY_NOW" and p30 < config.BUY_P30_MIN:
@@ -271,6 +283,16 @@ def submit(cands):
         chain = aid.split(":", 1)[0]
         venue = "coinbase" if chain == "cex" else chain
         plan = _plan_of(c)
+
+        if action == "SHORT_NOW":
+            from .. import shorts
+            if not shorts.enabled() or shorts.get(aid):
+                continue
+            state.add_ticket(asset_id=aid, venue="hyperliquid", chain=None, action="SHORT_NOW",
+                             notional_usd=config.PHASE1_ORDER_USD, forecast_id=fid,
+                             detail=c.get("what"))
+            n += 1
+            continue
 
         if action == "SELL_NOW":
             if not state.get_position(aid):

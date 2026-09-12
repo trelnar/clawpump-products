@@ -144,6 +144,26 @@ P30_WINDOW_SEC = int(env("P30_WINDOW_SEC", str(6 * 3600)))
 BUY_P30_MIN = float(env("BUY_P30_MIN", "0.35"))
 STOP_LOSS_PCT = float(env("STOP_LOSS_PCT", "0.15"))
 
+# --- the short leg: Hyperliquid perps, 1x (SHORTS.md) -----------------------
+SHORTS_ENABLED = env("SHORTS_ENABLED", "0") not in ("0", "false", "")   # on once funded + probed
+HL_LEVERAGE = 1
+HL_TARGET = float(env("HL_TARGET", "0.08"))          # thesis: -8% within P30_WINDOW_SEC
+HL_STOP_PCT = float(env("HL_STOP_PCT", "0.04"))      # cover if price rises 4% above entry
+HL_ARM_PCT = 0.05                                    # ratchet arms once -5% has held 3 closes
+HL_BE_PCT = 0.003                                    # on arm, stop drops to just inside profit
+HL_GIVEBACK = 0.03                                   # cover 75% on a 3% bounce off the low
+HL_TAKE_PCT = 0.06                                   # a -6% capitulation that is already bouncing
+HL_MAX_HOLD_SEC = 12 * 3600                          # 2x the thesis window, then out
+HL_MAX_OPEN = int(env("HL_MAX_OPEN", "3"))
+HL_MIN_NOTIONAL_USD = 10.0
+HL_MARGIN_BUFFER = 1.2                               # account value needed per $1 of notional
+HL_FEE_RATE = 0.00045                                # taker, per side
+HL_SLIPPAGE = 0.01
+HL_MIN_VOLUME_USD = float(env("HL_MIN_VOLUME_USD", "2000000"))
+HL_PUMP_MIN = float(env("HL_PUMP_MIN", "0.12"))      # 24h gain that makes a short candidate
+HL_CANDIDATES = int(env("HL_CANDIDATES", "6"))
+HL_MONITOR_SEC = 10
+
 # --- the ratchet (context-aware profit exit; see RATCHET.md) ---------------
 # off: nothing. shadow: compute, journal would-sells, never trade (the gate for
 # going live is the RATCHET report). live: sells the ratchet share.

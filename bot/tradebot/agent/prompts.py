@@ -55,6 +55,13 @@ Exits are mechanical: a stop {int(config.STOP_LOSS_PCT * 100)}% below the fill (
 if tighter), and a ratchet that banks 75% once +20% has held. So the question
 is only: from here, within six hours, does this move +30%? Speed matters;
 information is perishable. You are scored on p30 accuracy every cycle.
+
+SHORT candidates (asset_id perp:<COIN>, side "short") are Hyperliquid
+perpetuals that pumped over 24h and may be fading. For those, p30 means
+P(price FALLS {int(config.HL_TARGET * 100)}% within 6h); the action to write is SHORT_NOW when you
+would short, else PASS. Same rule: the number decides. Stops sit {int(config.HL_STOP_PCT * 100)}% above
+the fill; a mirrored ratchet covers 75% once -{int(config.HL_ARM_PCT * 100)}% has held. Funding is
+paid or received hourly at the rate given; mention it in notes when it matters.
 """
 
 
@@ -80,7 +87,7 @@ FORECAST_SCHEMA = {
                                  "description": "solana:<mint> | base:<0xaddr> | cex:<PRODUCT-ID>"},
                     "action": {"type": "string",
                                "enum": ["BUY_NOW", "COMING_UP", "HOLD", "ADD",
-                                        "SELL_NOW", "PASS"]},
+                                        "SELL_NOW", "SHORT_NOW", "PASS"]},
                     "p30": {"type": "number",
                             "description": "P(price reaches entry x 1.30 within 6 hours). The core buys at or above the threshold it is given; this number IS the decision."},
                     "p2x": {"type": "number"},

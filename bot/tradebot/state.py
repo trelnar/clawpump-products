@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS tickets (
   notional_usd REAL, buy_zone_lo REAL, buy_zone_hi REAL, invalidation_price REAL,
   forecast_id INTEGER, detail TEXT, plan TEXT, sell_fraction REAL
 );
+CREATE TABLE IF NOT EXISTS shorts (
+  asset_id TEXT PRIMARY KEY, coin TEXT, qty REAL, entry_price REAL, notional_usd REAL,
+  entry_ts REAL, stop_price REAL, ratchet TEXT, lwm REAL, last_alert_ts REAL
+);
 CREATE TABLE IF NOT EXISTS pending_approvals (
   code TEXT PRIMARY KEY, ts REAL, expires REAL, kind TEXT, asset_id TEXT,
   ticket_id INTEGER, status TEXT
@@ -53,7 +57,9 @@ def _migrate():
                              ("forecasts", "p30", "REAL"),
                              ("outcomes", "hit_30", "INTEGER"),
                              ("forecast_tracking", "max_6h", "REAL"),
-                             ("forecast_tracking", "samples", "INTEGER DEFAULT 0")):
+                             ("forecast_tracking", "samples", "INTEGER DEFAULT 0"),
+                             ("forecast_tracking", "min_price", "REAL"),
+                             ("forecast_tracking", "min_6h", "REAL")):
         cols = {r["name"] for r in journal.query(f"PRAGMA table_info({table})")}
         if col not in cols:
             with journal._lock:

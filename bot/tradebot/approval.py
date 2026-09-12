@@ -112,7 +112,7 @@ class Commands:
                                  raw_text=raw, sender=None, asset_id=None)
             alerts.ops(f"Code {code} is not live.")
             return
-        if p["kind"] == "buy" and state.get_mode() != "NORMAL":
+        if p["kind"] in ("buy", "short") and state.get_mode() != "NORMAL":
             # Do not consume the code: RESUME, then this same YES still works.
             journal.log_approval(code=code, asset_id=p["asset_id"], kind="buy",
                                  event="blocked_halt", raw_text=raw, sender=None)
@@ -122,9 +122,9 @@ class Commands:
         state.resolve_pending(code, "approved")
         journal.log_approval(code=code, asset_id=p["asset_id"], kind=p["kind"],
                              event="approved", raw_text=raw, sender=None)
-        if p["kind"] == "buy":
+        if p["kind"] in ("buy", "short"):
             state.whitelist_add(p["asset_id"], "")  # approval whitelists the asset
-            self.on_approved_buy(p)
+            self.on_approved_buy(p)                 # marks the ticket; the core does the work
         elif p["kind"] == "resume":
             state.set_mode("NORMAL", reason="user-approved resume")
             alerts.ops("Buying resumed.")

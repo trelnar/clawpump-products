@@ -47,6 +47,10 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   into BUY_NOW and anything below into not-a-buy, whatever the model wrote. Stops are set
   15% below the fill unless the model's invalidation is tighter. `SCORE` reports the
   +30%/6h hit rate per action and the model gets its p30 calibration every cycle.
+- **The short leg** (`SHORTS.md`): Hyperliquid perps at 1x on tokens that pumped and are
+  fading, mirrored thesis (−8% in 6h) and mirrored ratchet, own book and monitor. Built
+  2026-09-13, OFF until the operator funds Hyperliquid through the Arbitrum bridge and runs
+  `scripts/hl_probe.py`; then `SHORTS_ENABLED=1`.
 - **The ratchet** (`RATCHET.md`): a context-aware profit exit, in SHADOW since 2026-09-09.
   It arms after +20% has held for three 1-minute closes, and would sell 75% on a blow-off,
   floor breach or cold stall. `RATCHET` in Telegram reports the shadow gate; it trades only
