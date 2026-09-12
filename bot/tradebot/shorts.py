@@ -243,7 +243,8 @@ def _cover(asset, fraction, reason):
         pos = None
     live = pos.get(coin) if pos is not None else None
     if pos is not None and (live is None or live["size"] >= 0):
-        journal.log_event("short_gone", asset, {"book_qty": r["qty"], "exchange": live["size"]})
+        journal.log_event("short_gone", asset, {"book_qty": r["qty"],
+                                                "exchange": live["size"] if live else None})
         _delete(asset)
         alerts.ops(f"My {coin} short is no longer on Hyperliquid; I've dropped it from the book.")
         return "gone"

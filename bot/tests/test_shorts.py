@@ -81,9 +81,13 @@ class Base(unittest.TestCase):
             self.patch(hl, name, getattr(self.fake, name))
         self.patch(config, "SHORTS_ENABLED", True)
         state.set_mode("NORMAL", reason="test")     # a fresh DB cold-starts SELL_ONLY
-        for coin in ("ETH", "WIF"):                 # earlier tests leave cooldowns behind
+        for coin in ("ETH", "WIF"):                 # earlier tests leave cooldowns/approvals behind
             state.set_kv(f"stopout:perp:{coin}", "")
             state.set_kv(f"ratchet_exit:perp:{coin}", "")
+            state.whitelist_revoke(f"perp:{coin}")
+        with journal._lock:
+            journal.conn().execute("DELETE FROM pending_approvals WHERE asset_id LIKE 'perp:%'")
+            journal.conn().commit()
         self.out = []
         self.patch(alerts, "_send_fn", lambda body, buttons=None: self.out.append(body) or True)
         state.set_auto_approve(0)
