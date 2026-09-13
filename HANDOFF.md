@@ -69,8 +69,11 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   ticket is retried every minute until it ages out at 15 min (`ENTRY_M5_MIN_PCT`,
   `ENTRY_M5_MAX_PCT`). Gate 4's round-trip allowance is 5% (`ROUNDTRIP_LOSS_MAX`, was 9%).
   `SCORE` reports, per action, the thesis *as a trade*: won (+30% printed before −15%),
-  stopped, flat, and the simulated P&L per $10 after `SIM_FRICTION`. The tracker samples
-  every 5 min in its own thread (it used to block the position monitor for a minute).
+  stopped, flat, and the simulated P&L per $10 after costs (`SIM_FRICTION` for tokens, two
+  taker fees for perps; perps are bucketed apart as `PASS/perp` etc.). The tracker samples
+  every 5 min in its own thread (it used to block the position monitor for a minute). An
+  approved ticket that was deferred re-checks the whitelist and the cooldowns before the
+  order goes in, so a `REVOKE` or a stop-out during the wait still counts.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).

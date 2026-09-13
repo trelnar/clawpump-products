@@ -370,8 +370,22 @@ class ApprovedBuyGates(Base):
         self.patch(coinbase, "balances", lambda: {"USD": 1000.0})
         t = ticket("cex:GGG-USD", "coinbase")
         t["ts"] = time.time()
+        state.whitelist_add("cex:GGG-USD", "coinbase")   # what the YES itself does
         self.assertEqual(execution.execute_approved(t, 1000.0, True), "filled")
         self.assertEqual(self.calls, ["cex:GGG-USD"])
+
+    def test_a_revoked_approval_blocks_the_buy(self):
+        state.set_mode("NORMAL", reason="test")
+        self.patch(execution.marketdata, "price", lambda a: 1.0)
+        self.patch(execution.risk, "check_buy", lambda *a, **k: None)
+        self.patch(coinbase, "balances", lambda: {"USD": 1000.0})
+        self.patch(execution.alerts, "ops", lambda m: None)
+        t = ticket("cex:HHH-USD", "coinbase")
+        t["ts"] = time.time()
+        state.whitelist_add("cex:HHH-USD", "coinbase")
+        state.whitelist_revoke("cex:HHH-USD")             # REVOKE before the order went in
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "blocked")
+        self.assertEqual(self.calls, [])
 
     def test_halt_blocks_an_approved_buy(self):
         self.patch(coinbase, "balances", lambda: {"USD": 1000.0})

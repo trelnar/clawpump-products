@@ -102,7 +102,7 @@ class SellProceeds(Base):
         d = self._exit_rows(asset)[-1]
         self.assertAlmostEqual(d["proceeds"], 8.15)          # the quote's outAmount
         self.assertTrue(d.get("unmeasured"))
-        self.assertTrue(any("Check the wallet" in m for m in self.said))
+        self.assertTrue(any("check the wallet" in m for m in self.said))
 
     def test_exit_friction_is_logged_against_the_print_sold_on(self):
         asset = self._pos()
@@ -117,6 +117,29 @@ class SellProceeds(Base):
         self.assertAlmostEqual(fr["eff"], 0.0815)
         self.assertAlmostEqual(fr["pct"], -0.185)
 
+    def test_an_unmeasured_sale_logs_no_slippage_row(self):
+        asset = self._pos()
+        self._clear("sell_friction")
+        self.patch(config, "SETTLE_READ_TRIES", 1)
+        self.patch(solana_dex, "usdc_balance", lambda: 50.0)
+        self.patch(solana_dex, "tx_token_delta", lambda *a, **k: None)
+        execution.execute_sell(asset, "test", 1.0)
+        self.assertEqual(journal.query("SELECT COUNT(*) n FROM events WHERE kind='sell_friction' "
+                                       "AND asset_id=?", (asset,))[0]["n"], 0)
+        self.assertIn("entry_ts", self._exit_rows(asset)[-1])
+
+    def test_selling_every_unit_the_books_know_of_closes_the_position(self):
+        asset = self._pos()
+        # the wallet holds twice what the books say (an earlier orphaned buy)
+        self.patch(solana_dex, "token_balance", lambda m: (200_000_000, 6))
+        self.patch(solana_dex, "usdc_balance", lambda: 50.0)
+        self.patch(solana_dex, "tx_token_delta", lambda *a, **k: 15.0)
+        self.assertEqual(execution.execute_sell(asset, "ratchet take", 0.75), "filled")
+        self.assertIsNone(state.get_position(asset))          # not a -50 unit row
+        d = self._exit_rows(asset)[-1]
+        self.assertAlmostEqual(d["cost"], 10.0)
+        self.assertAlmostEqual(d["pnl"], 5.0)
+
     def test_a_partial_swap_exit_books_the_requested_share(self):
         asset = self._pos()
         self.patch(solana_dex, "usdc_balance", lambda: 50.0)
@@ -128,8 +151,68 @@ class SellProceeds(Base):
         self.assertAlmostEqual(self._exit_rows(asset)[-1]["pnl"], 9.0 - 7.5)
 
 
+class DeferredApproval(Base):
+    """A deferral turns 'the moment of the tap' into a window of minutes."""
+
+    def _approved(self, asset):
+        state.set_kv(f"symbol:{asset}", "rvk")
+        tid = state.add_ticket(asset_id=asset, venue="solana", chain="solana",
+                               action="BUY_NOW", notional_usd=10.0, ts=time.time(),
+                               status="approved")
+        t = [x for x in state.tickets("approved") if x["ticket_id"] == tid][0]
+        state.whitelist_add(asset, "solana")
+        self.patch(execution.marketdata, "price", lambda a: 1.0)
+        self.patch(execution.risk, "check_buy", lambda *a, **k: None)
+        self.patch(solana_dex, "exit_safety", lambda *a, **k: (True, None, {"roundtrip_loss": 0.02}))
+        self.patch(solana_dex, "sol_balance", lambda: 1.0)
+        self.bought = []
+        def buy(t, ref):
+            self.bought.append(t["asset_id"])
+            state.set_ticket_status(t["ticket_id"], "filled")
+            return "filled"
+        self.patch(execution, "execute_buy", buy)
+        self.info = {"change_m5": -8.0}
+        self.patch(execution.marketdata, "last_info", lambda a, max_age=60: self.info)
+        return t
+
+    def test_a_revoke_during_the_wait_stops_the_buy(self):
+        t = self._approved("solana:REVOKEME")
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "deferred")
+        state.whitelist_revoke("solana:REVOKEME")
+        self.info["change_m5"] = 1.0
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "blocked")
+        self.assertEqual(self.bought, [])
+        self.assertTrue(any("approval was withdrawn" in m for m in self.said))
+        self.assertIsNone(state.get_kv(f"defer:{t['ticket_id']}"))
+
+    def test_a_stop_out_during_the_wait_stops_the_buy(self):
+        t = self._approved("solana:STOPPED")
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "deferred")
+        state.note_stopout("solana:STOPPED")
+        self.info["change_m5"] = 1.0
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "blocked")
+        self.assertEqual(self.bought, [])
+        self.assertIn("blocked:stopout_cooldown",
+                      [x["status"] for x in journal.query(
+                          "SELECT status FROM tickets WHERE ticket_id=?", (t["ticket_id"],))])
+
+    def test_the_wait_does_not_eat_the_tickets_life(self):
+        t = self._approved("solana:PATIENT")
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "deferred")
+        # 14 minutes pass while it waits; the call itself is now 'old'
+        t = dict(t, ts=t["ts"] - 14 * 60)
+        state.set_kv(f"defer:{t['ticket_id']}", f"{time.time() - 60:.0f}")
+        self.info["change_m5"] = 0.5
+        self.assertEqual(execution.execute_approved(t, 1000.0, True), "filled")
+        self.assertEqual(self.bought, ["solana:PATIENT"])
+
+
 class RepairZeroProceeds(Base):
     """Exits booked with $0 proceeds are re-read from their transaction."""
+
+    def setUp(self):
+        super().setUp()
+        self._clear("exit_pnl", "exit_pnl_repaired")
 
     def _seed(self, asset, tx="sigR"):
         state.set_kv(f"symbol:{asset}", "rz")
@@ -149,12 +232,57 @@ class RepairZeroProceeds(Base):
         self.assertAlmostEqual(d["pnl"], -1.85)
         self.assertTrue(d["repaired"])
         self.assertAlmostEqual(d["pnl_before_repair"], -10.0)
-        self.assertTrue(any("Corrected 1 past exit" in m for m in self.said))
+        self.assertTrue(any("I re-checked 1 past sale" in m for m in self.said))
         # idempotent: nothing left to repair
         self.assertEqual(execution.repair_zero_proceeds(), [])
         txt = core.pnl_text("30")
         self.assertIn("Realised : $-1.85", txt)
         self.assertIn("corrected from $-10.00", txt)
+
+    def test_two_exits_minutes_apart_each_get_their_own_transaction(self):
+        self._clear("exit_pnl", "exit_pnl_repaired")
+        state.set_kv("symbol:solana:TWO", "two")
+        now = time.time()
+        with journal._lock:
+            c = journal.conn()
+            for ts, cost, tx in ((now - 400, 7.5, "sig75"), (now - 100, 2.5, "sig25")):
+                c.execute("INSERT INTO events (ts, kind, asset_id, detail) VALUES (?,?,?,?)",
+                          (ts, "exit_pnl", "solana:TWO", json.dumps(
+                              {"pnl": -cost, "proceeds": 0.0, "cost": cost, "share": 1.0,
+                               "reason": "x"})))
+                c.execute("INSERT INTO fills (ts, asset_id, side, qty, price, venue, tx_ref) "
+                          "VALUES (?,?,?,?,?,?,?)", (ts + 1, "solana:TWO", "sell", 1, 1,
+                                                     "solana", tx))
+            c.commit()
+        deltas = {"sig75": 9.6, "sig25": 2.2}
+        self.patch(solana_dex, "tx_token_delta", lambda sig, mint, owner=None: deltas[sig])
+        fixed = execution.repair_zero_proceeds()
+        self.assertEqual(sorted(round(n, 2) for _a, _o, n in fixed), [-0.3, 2.1])
+        rows = self._exit_rows("solana:TWO")
+        self.assertEqual([r["tx"] for r in rows], ["sig75", "sig25"])
+        self.assertAlmostEqual(rows[0]["proceeds"], 9.6)
+        self.assertAlmostEqual(rows[1]["proceeds"], 2.2)
+
+    def test_an_exit_that_carries_its_transaction_uses_it_and_an_estimate_is_rechecked(self):
+        self._clear("exit_pnl")
+        state.set_kv("symbol:solana:EST", "est")
+        journal.log_event("exit_pnl", "solana:EST", {"pnl": -1.5, "proceeds": 8.5, "cost": 10.0,
+                                                     "share": 1.0, "reason": "x",
+                                                     "tx": "sigEst", "unmeasured": True})
+        self.patch(solana_dex, "tx_token_delta", lambda sig, mint, owner=None: 7.9 if sig == "sigEst" else 0)
+        fixed = execution.repair_zero_proceeds()
+        self.assertEqual([(a, round(n, 2)) for a, _o, n in fixed], [("solana:EST", -2.1)])
+        d = self._exit_rows("solana:EST")[-1]
+        self.assertNotIn("unmeasured", d)
+        self.assertAlmostEqual(d["proceeds"], 7.9)
+
+    def test_a_corrected_non_loss_lifts_the_stop_out_cooldown(self):
+        self._clear("exit_pnl")
+        self._seed("solana:RZ5", tx="sigW")
+        state.note_stopout("solana:RZ5")
+        self.patch(solana_dex, "tx_token_delta", lambda *a, **k: 11.2)
+        execution.repair_zero_proceeds()
+        self.assertIsNone(state.stopped_out_recently("solana:RZ5"))
 
     def test_a_genuine_zero_is_left_alone(self):
         self._clear("exit_pnl")
@@ -229,7 +357,10 @@ class EntryTiming(Base):
         state.set_kv(f"defer:{t['ticket_id']}", "1")
         self.patch(execution.marketdata, "last_info", lambda a, max_age=60: {"change_m5": -9.0})
         self.assertEqual(execution.process_ticket(t, 1000.0, True), "blocked")
-        self.assertEqual(self.not_bought[-1][1], "waited_out")
+        self.assertEqual(self.not_bought, [])
+        self.assertTrue(any("I didn't buy knife" in m for m in self.said))
+        self.assertEqual(state.tickets("new"), [x for x in state.tickets("new")
+                                                if x["ticket_id"] != t["ticket_id"]])
         self.assertIsNone(state.get_kv(f"defer:{t['ticket_id']}"))
 
     def test_no_pair_info_means_no_timing_gate(self):
@@ -267,7 +398,8 @@ class PnlLastExits(Base):
         txt = core.pnl_text("1")
         self.assertIn("Last exits (UTC):", txt)
         self.assertIn("rat: $-1.85 (-18%) after 2m, it hit the stop", txt)
-        self.assertIn("Friction : ~3.8% per round trip (entry +2.0%, exit -1.8%)", txt)
+        self.assertIn("Slippage : ~3.8% per trade (paid 2.0% over the price buying, "
+                      "got 1.8% under it selling)", txt)
 
 
 class SimOutcome(Base):
@@ -298,15 +430,15 @@ class SimOutcome(Base):
         o = self._run("solana:SIM1", 1.0, [0.84, 1.35])
         self.assertEqual(o["hit_30"], 1)                 # +30% was there...
         self.assertEqual(o["sim_result"], "stop")        # ...after the stop had fired
-        self.assertAlmostEqual(o["sim_return"], -0.15)
+        self.assertAlmostEqual(o["sim_return"], -0.19)   # -15% and the 4% round trip
         txt = calibration.scorecard(1)
         self.assertIn("stopped 100%", txt)
-        self.assertIn("$-1.90 each after 4% friction", txt)
+        self.assertIn("$-1.90 each after costs", txt)
 
     def test_the_target_printing_first_is_a_win(self):
         o = self._run("solana:SIM2", 1.0, [1.31, 0.8])
         self.assertEqual(o["sim_result"], "target")
-        self.assertAlmostEqual(o["sim_return"], 0.30)
+        self.assertAlmostEqual(o["sim_return"], 0.26)
         fb = calibration.feedback()["BUY_NOW"]
         self.assertAlmostEqual(fb["target_before_stop_share"], 1.0)
         self.assertAlmostEqual(fb["stopped_first_share"], 0.0)
@@ -315,17 +447,45 @@ class SimOutcome(Base):
     def test_neither_is_the_move_at_the_end_of_the_window(self):
         o = self._run("solana:SIM3", 1.0, [1.05, 1.10])
         self.assertEqual(o["sim_result"], "flat")
-        self.assertAlmostEqual(o["sim_return"], 0.10)
+        self.assertAlmostEqual(o["sim_return"], 0.06)
 
     def test_a_short_thesis_is_mirrored(self):
         self.patch(calibration.config, "HL_TARGET", 0.08)
         self.patch(calibration.config, "HL_STOP_PCT", 0.04)
+        self.patch(calibration.config, "HL_FEE_RATE", 0.00045)
         o = self._run("perp:SIMX", 100.0, [105.0, 90.0], action="SHORT_NOW")
         self.assertEqual(o["sim_result"], "stop")
-        self.assertAlmostEqual(o["sim_return"], -0.04)
+        self.assertAlmostEqual(o["sim_return"], -0.0409)   # perp fees, not the DEX 4%
         o = self._run("perp:SIMY", 100.0, [91.0], action="SHORT_NOW")
         self.assertEqual(o["sim_result"], "target")
-        self.assertAlmostEqual(o["sim_return"], 0.08)
+        self.assertAlmostEqual(o["sim_return"], 0.0791)
+        self.assertIn("SHORT_NOW/perp", calibration.scorecard(1))
+
+    def test_a_row_the_new_tracker_never_saw_in_window_has_no_sim(self):
+        fid = journal.log_forecast({"asset_id": "solana:LEGACY", "action": "BUY_NOW", "p30": 0.5})
+        calibration.open_tracking(fid, "solana:LEGACY", "BUY_NOW", 1.0)
+        with journal._lock:      # what the old tracker left: sampled, +40%, no new columns
+            journal.conn().execute("UPDATE forecast_tracking SET max_6h=1.4, samples=20, "
+                                   "start_ts=start_ts-7*3600 WHERE forecast_id=?", (fid,))
+            journal.conn().commit()
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:LEGACY": 1.2}, True))
+        calibration.tick()
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 0)
+        calibration.tick()
+        o = journal.query("SELECT * FROM outcomes WHERE forecast_id=?", (fid,))[0]
+        self.assertEqual(o["hit_30"], 1)
+        self.assertIsNone(o["sim_result"])
+        self.assertIsNone(o["sim_return"])
+        self.assertNotIn("sim_pnl_per_10usd", calibration.feedback().get("BUY_NOW", {}))
+
+    def test_a_perp_pass_is_not_averaged_with_token_passes(self):
+        self.patch(calibration.config, "HL_TARGET", 0.08)
+        self.patch(calibration.config, "HL_STOP_PCT", 0.04)
+        self._run("perp:PP", 100.0, [91.0], action="PASS")     # fell 9%: a short win
+        self._run("solana:TP", 1.0, [0.91], action="PASS")    # fell 9%: a long loss
+        fb = calibration.feedback()
+        self.assertAlmostEqual(fb["PASS/perp"]["target_before_stop_share"], 1.0)
+        self.assertAlmostEqual(fb["PASS"]["target_before_stop_share"], 0.0)
 
 
 class TxDeltaParsers(Base):
@@ -415,6 +575,22 @@ class SymbolLookup(Base):
         self.assertEqual(alerts.symbol("solana:NONET123", lookup=False), "NONET1")
         self.assertEqual(calls, [])
         self.assertIsNone(state.get_kv("symbol:solana:NONET123"))
+
+    def test_a_failed_lookup_is_not_remembered_as_the_name(self):
+        from tradebot import alerts, marketdata
+        alerts._symbol_cache.pop("solana:FLAKY456", None)
+        answers = iter([RuntimeError("502"), {"base_symbol": "FLK"}])
+
+        def lookup(c, a):
+            v = next(answers)
+            if isinstance(v, Exception):
+                raise v
+            return v
+        self.patch(marketdata, "dexscreener_token", lookup)
+        self.assertEqual(alerts.symbol("solana:FLAKY456"), "FLAKY4")   # this time
+        self.assertIsNone(state.get_kv("symbol:solana:FLAKY456"))
+        self.assertEqual(alerts.symbol("solana:FLAKY456"), "FLK")      # next time
+        self.assertEqual(state.get_kv("symbol:solana:FLAKY456"), "FLK")
 
 
 class TrackerAsync(Base):

@@ -141,8 +141,9 @@ def pnl_text(arg=None):
     if fr:
         b = fr.get("buy_friction", {}).get("p") or 0
         sl = fr.get("sell_friction", {}).get("p") or 0
-        lines.append(f"Friction : ~{max(b, 0) + max(-sl, 0):.1%} per round trip "
-                     f"(entry {b:+.1%}, exit {sl:+.1%})")
+        lines.append(f"Slippage : ~{max(b, 0) + max(-sl, 0):.1%} per trade (paid "
+                     f"{max(b, 0):.1%} over the price buying, got {max(-sl, 0):.1%} "
+                     "under it selling)")
     lines += last_exits_lines(since)
     return "\n".join(lines)
 
@@ -163,12 +164,16 @@ def last_exits_lines(since, limit=None):
             continue
         pnl, cost = float(d.get("pnl") or 0), float(d.get("cost") or 0)
         pct = f" ({pnl / cost:+.0%})" if cost else ""
-        buy = journal.query("SELECT ts FROM fills WHERE asset_id=? AND side IN ('buy','short') "
-                            "AND ts <= ? ORDER BY ts DESC LIMIT 1",
-                            (r["asset_id"], r["ts"] + 5))
+        entry_ts = d.get("entry_ts")
+        if entry_ts is None:
+            # rows from before the exit carried its own entry time
+            buy = journal.query("SELECT ts FROM fills WHERE asset_id=? AND side IN "
+                                "('buy','short') AND ts <= ? ORDER BY ts DESC LIMIT 1",
+                                (r["asset_id"], r["ts"] + 5))
+            entry_ts = buy[0]["ts"] if buy else None
         held = ""
-        if buy:
-            h = (r["ts"] - buy[0]["ts"]) / 3600
+        if entry_ts is not None:
+            h = (r["ts"] - float(entry_ts)) / 3600
             held = f" after {h * 60:.0f}m" if h < 1 else f" after {h:.1f}h"
         tag = ""
         if d.get("unmeasured"):
@@ -180,7 +185,7 @@ def last_exits_lines(since, limit=None):
         when = time.strftime("%m-%d %H:%M", time.gmtime(r["ts"]))
         out.append(f"  {when}{part} {alerts.symbol(r['asset_id'], lookup=False)}: "
                    f"${pnl:+.2f}{pct}{held}, "
-                   f"{alerts.plain_reason(d.get('reason'))}{tag}")
+                   f"{alerts.plain_reason(d.get('reason'), short=bool(d.get('short')))}{tag}")
     return out
 
 
@@ -382,6 +387,14 @@ def _report_fatal_agent_error(since_ts):
     return False
 
 
+def warm_symbols(days=30):
+    """Names for every asset PNL might list, fetched off the Telegram thread."""
+    since = time.time() - days * 86400
+    for r in journal.query("SELECT DISTINCT asset_id FROM events WHERE kind='exit_pnl' "
+                           "AND ts > ? AND asset_id IS NOT NULL", (since,)):
+        alerts.symbol(r["asset_id"])
+
+
 def _quiet(fn):
     try:
         fn()
@@ -416,9 +429,11 @@ def main():
     holder = {"p": telegram.Poller(cmds.handle)}
     holder["p"].start()
     alerts.ops(f"bot-core started. Mode {state.get_mode()}, phase {state.phase()}.")
-    # Past exits booked at $0 proceeds are re-read from their transactions.
-    # Network reads: off the loop, and never fatal.
-    threading.Thread(target=lambda: _quiet(execution.repair_zero_proceeds),
+    # Past exits booked at $0 proceeds are re-read from their transactions,
+    # and the names PNL prints are looked up once here rather than on the
+    # Telegram thread. Network reads: off the loop, and never fatal.
+    threading.Thread(target=lambda: (_quiet(execution.repair_zero_proceeds),
+                                     _quiet(warm_symbols)),
                      name="exit-repair", daemon=True).start()
 
     last = {"hb": 0, "value": 0, "monitor": 0, "tg": 0, "track": 0,
@@ -449,7 +464,8 @@ def main():
                 supervise_auto()
                 last["agentwatch"] = now
             if now - last["track"] >= config.TRACK_INTERVAL_SEC:
-                calibration.tick_async()      # off the loop: the monitor keeps its 5s
+                if not calibration.tick_async():   # off the loop: the monitor keeps its 5s
+                    journal.log_event("track_skipped", detail="previous pass still running")
                 last["track"] = now
             if now - last["posrecon"] >= config.RECON_POSITIONS_SEC:
                 monitor.reconcile_positions()
@@ -470,6 +486,7 @@ def main():
                             # an add would move the entry the floor is built on
                             state.set_ticket_status(t["ticket_id"], "blocked:ratchet_armed")
                             journal.log_event("ticket_ratchet_armed", t["asset_id"])
+                            state.del_kv(execution._defer_key(t))
                             continue
                         execution.process_ticket(t, value, fresh)
                     elif t["action"] == "SELL_NOW":

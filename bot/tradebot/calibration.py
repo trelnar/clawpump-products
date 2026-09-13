@@ -107,6 +107,15 @@ def _thresholds(asset_id):
     return config.P30_TARGET, config.STOP_LOSS_PCT, False
 
 
+def _friction(asset_id):
+    """Round-trip cost the sim charges: a DEX swap pair for tokens, two
+    taker fees for a perp. One flat 4% charged to shorts made every good
+    short strategy look like a loser."""
+    if (asset_id or "").startswith("perp:"):
+        return 2 * config.HL_FEE_RATE
+    return config.SIM_FRICTION
+
+
 def _advance(r, px, now):
     """One sample against one open forecast: extremes over the whole horizon,
     extremes and the last print inside the thesis window, and the FIRST time
@@ -138,20 +147,25 @@ def _advance(r, px, now):
 def _sim(r):
     """The trade the thesis implies, played on the samples: the target banked
     if it printed before the stop, the stop taken if it printed first, else
-    the move at the last print inside the window. Gross of friction; SCORE
-    subtracts SIM_FRICTION. Returns (result, return)."""
+    the move at the last print inside the window; net of the round trip.
+    Returns (result, return), or (None, None) for a row the new tracker
+    never observed inside its window (the rows in flight when these columns
+    arrived): scoring those as 'flat' would have fed the model several
+    hundred phantom losers."""
     start = r["start_price"] or 0
     target, stop, short = _thresholds(r["asset_id"])
-    st, tt = r.get("stop_ts"), r.get("target_ts")
+    st, tt, end = r.get("stop_ts"), r.get("target_ts"), r.get("end_6h")
+    if st is None and tt is None and end is None:
+        return None, None
+    fee = _friction(r["asset_id"])
     if st and (not tt or st <= tt):
-        return "stop", -stop
+        return "stop", -stop - fee
     if tt:
-        return "target", target
-    end = r.get("end_6h")
+        return "target", target - fee
     if end and start > 0:
         ret = end / start - 1
-        return "flat", (-ret if short else ret)
-    return "flat", 0.0
+        return "flat", (-ret if short else ret) - fee
+    return "flat", -fee
 
 
 def _resolve(forecast_id):
@@ -188,7 +202,8 @@ def _resolve(forecast_id):
                         hit_10x=int(bool(mult and mult >= 10)),
                         exit_result=r["action"], realized_pnl_usd=None,
                         slippage_vs_plan=None,
-                        sim_result=sim_result, sim_return=round(sim_ret, 4))
+                        sim_result=sim_result,
+                        sim_return=None if sim_ret is None else round(sim_ret, 4))
     with journal._lock:
         journal.conn().execute(
             "UPDATE forecast_tracking SET resolved=1 WHERE forecast_id=?", (forecast_id,))
@@ -233,30 +248,37 @@ def scorecard(days=30):
     went to 3x is a different failure from buying things that went to zero."""
     since = time.time() - days * 86400
     rows = journal.query(
-        "SELECT t.action a, COUNT(*) n, AVG(o.max_multiple) avg_mult, "
+        f"SELECT {_GROUP} a, COUNT(*) n, AVG(o.max_multiple) avg_mult, "
         "SUM(o.hit_30) h30, SUM(o.hit_2x) h2, SUM(o.hit_3x) h3, SUM(o.hit_5x) h5, "
         "SUM(CASE WHEN o.sim_result='target' THEN 1 ELSE 0 END) won, "
         "SUM(CASE WHEN o.sim_result='stop' THEN 1 ELSE 0 END) stopped, "
         "SUM(CASE WHEN o.sim_result IS NOT NULL THEN 1 ELSE 0 END) n_sim, "
         "AVG(o.sim_return) sim_ret "
         "FROM outcomes o JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
-        "WHERE o.ts > ? GROUP BY t.action ORDER BY n DESC", (since,))
+        f"WHERE o.ts > ? GROUP BY {_GROUP} ORDER BY n DESC", (since,))
     if not rows:
         return f"No forecasts have resolved yet (window {config.TRACK_WINDOW_SEC/3600:.0f}h)."
     out = [f"SCORECARD {days}d — resolved forecasts by the action taken "
            f"({config.TRACK_INTERVAL_SEC // 60}-min samples)"]
     for r in rows:
         n = r["n"] or 1
-        out.append(f"{r['a'] or '?'} n={r['n']}: +30%/6h {100*(r['h30'] or 0)/n:.0f}%, "
+        perp = (r["a"] or "").endswith("/perp")
+        tgt = f"-{config.HL_TARGET:.0%}" if perp else f"+{config.P30_TARGET:.0%}"
+        out.append(f"{r['a'] or '?'} n={r['n']}: {tgt}/6h {100*(r['h30'] or 0)/n:.0f}%, "
                    f"peak {r['avg_mult'] or 0:.2f}x, 2x {100*(r['h2'] or 0)/n:.0f}%")
         ns = r["n_sim"] or 0
         if ns:
             won, stopped = (r["won"] or 0), (r["stopped"] or 0)
-            per10 = 10 * ((r["sim_ret"] or 0) - config.SIM_FRICTION)
+            per10 = 10 * (r["sim_ret"] or 0)
             out.append(f"  as $10 trades ({ns}): won {100*won/ns:.0f}%, stopped "
                        f"{100*stopped/ns:.0f}%, flat {100*(ns-won-stopped)/ns:.0f}% -> "
-                       f"${per10:+.2f} each after {config.SIM_FRICTION:.0%} friction")
+                       f"${per10:+.2f} each after costs")
     return "\n".join(out)
+
+
+# Perps are scored on a short thesis, tokens on a long one; one PASS bucket
+# holding both would average 'fell 8%' wins with 'rose 30%' wins.
+_GROUP = "(t.action || CASE WHEN t.asset_id LIKE 'perp:%' THEN '/perp' ELSE '' END)"
 
 
 def feedback(days=14):
@@ -267,7 +289,7 @@ def feedback(days=14):
     about the very things it was seeing. Nothing was telling it. This does."""
     since = time.time() - days * 86400
     rows = journal.query(
-        "SELECT t.action a, COUNT(*) n, AVG(f.p2x) stated, AVG(o.hit_2x) hit2, "
+        f"SELECT {_GROUP} a, COUNT(*) n, AVG(f.p2x) stated, AVG(o.hit_2x) hit2, "
         "AVG(f.p30) stated30, AVG(o.hit_30) hit30, "
         "AVG(o.hit_3x) hit3, AVG(o.max_multiple) peak, "
         "AVG(CASE WHEN o.sim_result='target' THEN 1.0 WHEN o.sim_result IS NULL THEN NULL "
@@ -276,7 +298,7 @@ def feedback(days=14):
         "ELSE 0.0 END) stopped, AVG(o.sim_return) sim_ret "
         "FROM outcomes o JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
         "JOIN forecasts f ON f.forecast_id=o.forecast_id "
-        "WHERE o.ts > ? GROUP BY t.action", (since,))
+        f"WHERE o.ts > ? GROUP BY {_GROUP}", (since,))
     out = {}
     for r in rows:
         if not r["n"]:
@@ -294,7 +316,7 @@ def feedback(days=14):
             # the thesis as a trade: target banked before the stop printed?
             d["target_before_stop_share"] = round(r["won"] or 0, 3)
             d["stopped_first_share"] = round(r["stopped"] or 0, 3)
-            d["sim_pnl_per_10usd"] = round(10 * (r["sim_ret"] - config.SIM_FRICTION), 2)
+            d["sim_pnl_per_10usd"] = round(10 * r["sim_ret"], 2)   # net of costs
         out[r["a"] or "?"] = d
     return out
 

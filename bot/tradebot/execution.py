@@ -14,12 +14,17 @@ def _gates_buy(ticket, total_value, marks_fresh):
     # gate 1: halt mode NORMAL
     if state.get_mode() != "NORMAL":
         raise risk.Reject("halt", state.get_mode())
-    # gate 2: stale data / ticket age
-    if time.time() - ticket["ts"] > config.TICKET_MAX_AGE_SEC:
-        if state.get_kv(_defer_key(ticket)):
-            raise risk.Reject("waited_out", "the 5-minute move never settled inside "
-                              f"the call's {config.TICKET_MAX_AGE_SEC // 60} min")
-        raise risk.Reject("stale_ticket", f"age {int(time.time()-ticket['ts'])}s")
+    # gate 2: stale data / ticket age. A ticket that was deferred is aged
+    # from the moment it was first deferred: the wait must not eat the
+    # window in which the operator can still answer the approval it leads
+    # to. The zone check below still guards the price every pass.
+    deferred_at = _deferred_at(ticket)
+    age = time.time() - max(ticket["ts"], deferred_at or 0)
+    if age > config.TICKET_MAX_AGE_SEC:
+        if deferred_at:
+            raise risk.Reject("waited_out", "its 5-minute move never settled within the "
+                              f"{config.TICKET_MAX_AGE_SEC // 60} minutes the call was good for")
+        raise risk.Reject("stale_ticket", f"age {int(age)}s")
     ref = marketdata.price(ticket["asset_id"])
     if ref is None:
         raise risk.Reject("stale_data", "no reference price")
@@ -80,6 +85,36 @@ def _defer_key(ticket):
     return f"defer:{ticket['ticket_id']}"
 
 
+def _deferred_at(ticket):
+    """When this ticket was first deferred, or None. The marker lives until
+    the ticket reaches a terminal state (filled, failed, blocked)."""
+    v = state.get_kv(_defer_key(ticket))
+    try:
+        return float(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _post_gate_block(ticket):
+    """The checks that sit between the market gates and the order: they are
+    about THIS asset's recent history, and they must hold at the moment of
+    the buy. process_ticket ran them once; the approved path did not run
+    them at all, and a deferral makes 'the moment of the tap' a window of
+    minutes in which the asset can stop out, be revoked, or be told NO.
+    Returns (rule, detail) or None."""
+    asset = ticket["asset_id"]
+    age = ratchet.reentry_paused(asset)
+    if age is not None:
+        return "ratchet_reentry", {"min_ago": int(age / 60)}
+    age = state.rejected_recently(asset)
+    if age is not None:
+        return "rejected_cooldown", {"rejected_min_ago": int(age / 60)}
+    age = state.stopped_out_recently(asset)
+    if age is not None:
+        return "stopout_cooldown", {"stopped_min_ago": int(age / 60)}
+    return None
+
+
 def _entry_timing(ticket, info):
     """Not while it is being sold into, and not on the leg we already missed.
 
@@ -119,16 +154,18 @@ def _run_gates(ticket, total_value, marks_fresh):
                 state.set_kv(key, f"{time.time():.0f}")
                 journal.log_event("ticket_deferred", asset,
                                   {"rule": rj.rule, "detail": rj.detail})
-                left = max(0, int((ticket["ts"] + config.TICKET_MAX_AGE_SEC - time.time()) / 60))
-                alerts.ops(f"Not buying {alerts.symbol(asset)} yet: {rj.detail}. I retry "
-                           f"every minute for up to {left} min and buy once it settles.")
+                alerts.ops(f"Not buying {alerts.symbol(asset)} yet: {rj.detail}. I look "
+                           f"again every minute for up to {config.TICKET_MAX_AGE_SEC // 60} "
+                           "min and carry on once it settles.")
             return DEFERRED
         risk.log_reject(asset, rj)
         state.set_ticket_status(ticket["ticket_id"], f"blocked:{rj.rule}")
-        alerts.not_bought(asset, rj.rule, rj.detail)
+        if rj.rule == "waited_out":
+            alerts.ops(f"I didn't buy {alerts.symbol(asset)}: {rj.detail}.")
+        else:
+            alerts.not_bought(asset, rj.rule, rj.detail)
         state.del_kv(_defer_key(ticket))
         return None
-    state.del_kv(_defer_key(ticket))
     return ref
 
 
@@ -140,30 +177,20 @@ def process_ticket(ticket, total_value, marks_fresh):
     if ref is None:
         return "blocked"
     # A ratchet winner stays whitelisted, so its pause must come before the
-    # whitelist shortcut or it is unreachable for the only case it exists for.
-    age = ratchet.reentry_paused(ticket["asset_id"])
-    if age is not None:
-        state.set_ticket_status(ticket["ticket_id"], "blocked:ratchet_reentry")
-        journal.log_event("ticket_ratchet_reentry", ticket["asset_id"], {"min_ago": int(age / 60)})
+    # whitelist shortcut or it is unreachable for the only case it exists
+    # for. A NO is an answer, not a request to ask again in 15 minutes. A
+    # stop that just fired is the market's answer. None of these is a
+    # question for the operator.
+    blocked = _post_gate_block(ticket)
+    if blocked:
+        rule, detail = blocked
+        state.set_ticket_status(ticket["ticket_id"], f"blocked:{rule}")
+        journal.log_event(f"ticket_{rule}", ticket["asset_id"], detail)
+        state.del_kv(_defer_key(ticket))
         return "blocked"
     # gate 5: whitelist or approval
     if state.is_whitelisted(ticket["asset_id"]):
         return execute_buy(ticket, ref)
-    # A NO is an answer, not a request to ask again in 15 minutes. The same
-    # asset used to come straight back on the next research cycle.
-    age = state.rejected_recently(ticket["asset_id"])
-    if age is not None:
-        state.set_ticket_status(ticket["ticket_id"], "blocked:rejected_cooldown")
-        journal.log_event("ticket_rejected_cooldown", ticket["asset_id"],
-                          {"rejected_min_ago": int(age / 60)})
-        return "blocked"
-    # A stop that just fired is the market's answer. No re-entry for a while.
-    age = state.stopped_out_recently(ticket["asset_id"])
-    if age is not None:
-        state.set_ticket_status(ticket["ticket_id"], "blocked:stopout_cooldown")
-        journal.log_event("ticket_stopout_cooldown", ticket["asset_id"],
-                          {"stopped_min_ago": int(age / 60)})
-        return "blocked"
     if state.auto_approve_active():
         # The operator's standing YES, bounded in time. The asset is whitelisted
         # exactly as a tap would, so the same TTL, re-entry cap and loss-revoke
@@ -178,6 +205,7 @@ def process_ticket(ticket, total_value, marks_fresh):
         "Size": f"${ticket['notional_usd']:.2f}",
         "Zone": f"{ticket.get('buy_zone_lo')}-{ticket.get('buy_zone_hi')}",
         "Invalidation": ticket.get("invalidation_price")})
+    state.del_kv(_defer_key(ticket))   # the approval starts a fresh clock
     return "awaiting_approval"
 
 
@@ -190,6 +218,24 @@ def execute_approved(ticket, total_value, marks_fresh):
     if ref is DEFERRED:
         return "deferred"
     if ref is None:
+        return "blocked"
+    asset = ticket["asset_id"]
+    # The YES whitelisted the asset. If that grant is gone by the time the
+    # order is placed -- a REVOKE while the ticket was deferred -- the tap
+    # no longer stands. Same for a stop-out or a NO in the meantime.
+    if not state.is_whitelisted(asset):
+        state.set_ticket_status(ticket["ticket_id"], "blocked:revoked")
+        journal.log_event("ticket_revoked", asset)
+        state.del_kv(_defer_key(ticket))
+        alerts.ops(f"Not buying {alerts.symbol(asset)}: its approval was withdrawn "
+                   "before the order went in.")
+        return "blocked"
+    blocked = _post_gate_block(ticket)
+    if blocked:
+        rule, detail = blocked
+        state.set_ticket_status(ticket["ticket_id"], f"blocked:{rule}")
+        journal.log_event(f"ticket_{rule}", asset, detail)
+        state.del_kv(_defer_key(ticket))
         return "blocked"
     return execute_buy(ticket, ref)
 
@@ -413,28 +459,40 @@ def repair_zero_proceeds(days=30):
     since = time.time() - days * 86400
     rows = journal.query("SELECT event_id, ts, asset_id, detail FROM events "
                          "WHERE kind='exit_pnl' AND ts>? ORDER BY ts", (since,))
-    fixed = []
+    parsed = []
     for r in rows:
         try:
-            d = json.loads(r["detail"] or "{}")
+            parsed.append((r, json.loads(r["detail"] or "{}")))
         except (TypeError, ValueError):
             continue
-        if (d.get("proceeds") or 0) > 0 or d.get("repaired"):
+    # A transaction belongs to one exit. Never book the same one twice.
+    used = {str(d.get("tx")) for _r, d in parsed if d.get("tx")}
+    fixed = []
+    for r, d in parsed:
+        if d.get("repaired"):
+            continue
+        if (d.get("proceeds") or 0) > 0 and not d.get("unmeasured"):
             continue
         asset = r["asset_id"] or ""
         chain = asset.split(":", 1)[0]
         if chain not in ("solana", "base"):
             continue
-        f = journal.query("SELECT tx_ref FROM fills WHERE asset_id=? AND side='sell' "
-                          "AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 1",
-                          (asset, r["ts"] - 600, r["ts"] + 600))
-        if not f or not f[0]["tx_ref"]:
-            continue
+        tx = d.get("tx")
+        if not tx:
+            # Rows from before the tx was journaled: the sell fill is written
+            # right AFTER its exit row, so take the first one at or after it.
+            f = journal.query("SELECT tx_ref FROM fills WHERE asset_id=? AND side='sell' "
+                              "AND ts BETWEEN ? AND ? ORDER BY ts ASC LIMIT 1",
+                              (asset, r["ts"] - 5, r["ts"] + 600))
+            tx = f[0]["tx_ref"] if f else None
+            if not tx or tx in used:
+                continue
+            used.add(tx)
         try:
             if chain == "solana":
-                delta = solana_dex.tx_token_delta(f[0]["tx_ref"], solana_dex.USDC_MINT)
+                delta = solana_dex.tx_token_delta(tx, solana_dex.USDC_MINT)
             else:
-                delta = evm_dex.tx_token_delta(f[0]["tx_ref"], evm_dex.USDC)
+                delta = evm_dex.tx_token_delta(tx, evm_dex.USDC)
         except Exception as e:
             journal.log_event("exit_repair_fail", asset, str(e)[:120])
             continue
@@ -442,20 +500,28 @@ def repair_zero_proceeds(days=30):
             continue
         cost = float(d.get("cost") or 0)
         old = float(d.get("pnl") or 0)
-        d.update({"proceeds": round(delta, 4), "pnl": round(delta - cost, 4),
-                  "repaired": True, "pnl_before_repair": old})
+        new = delta - cost
+        d.update({"proceeds": round(delta, 4), "pnl": round(new, 4),
+                  "repaired": True, "pnl_before_repair": old, "tx": tx})
         d.pop("unmeasured", None)
         with journal._lock:
             journal.conn().execute("UPDATE events SET detail=? WHERE event_id=?",
                                    (json.dumps(d), r["event_id"]))
             journal.conn().commit()
-        journal.log_event("exit_pnl_repaired", asset,
-                          {"was": old, "now": round(delta - cost, 4), "tx": f[0]["tx_ref"]})
-        fixed.append((asset, old, delta - cost))
+        journal.log_event("exit_pnl_repaired", asset, {"was": old, "now": round(new, 4), "tx": tx})
+        # The phantom loss put the asset in the stop-out cooldown; a real
+        # non-loss lifts it. The approval it withdrew stays withdrawn.
+        if float(d.get("share") or 1) >= 0.999 and new >= -config.LOSS_THRESHOLD_USD:
+            state.del_kv(f"stopout:{asset}")
+        fixed.append((asset, old, new))
     if fixed:
-        parts = ", ".join(f"{alerts.symbol(a)} ${o:+.2f} -> ${n:+.2f}" for a, o, n in fixed)
-        alerts.ops(f"Corrected {len(fixed)} past exit(s) whose proceeds the wallet read "
-                   f"missed: {parts}. PNL now reflects the chain.")
+        money = lambda v: f"{'-' if v < 0 else '+'}${abs(v):.2f}"  # noqa: E731
+        parts = ", ".join(f"{alerts.symbol(a)} was {money(o)}, actually {money(n)}"
+                          for a, o, n in fixed)
+        alerts.ops(f"I re-checked {len(fixed)} past sale(s) against the blockchain and "
+                   f"fixed the numbers: {parts}. PNL is updated. Any approval I withdrew "
+                   "over the old number stays withdrawn; the token will ask you again "
+                   "when it is next proposed.")
     return fixed
 
 
@@ -539,8 +605,10 @@ def execute_buy(ticket, ref_price):
     except Exception as e:
         journal.log_event("buy_failed", asset, str(e))
         state.set_ticket_status(ticket["ticket_id"], "failed")
+        state.del_kv(_defer_key(ticket))
         alerts.not_bought(asset, "execution", str(e)[:120])
         return "failed"
+    state.del_kv(_defer_key(ticket))
 
     cash_venue = venue if venue == "coinbase" else chain
     state.set_cash(cash_venue, state.cash(cash_venue) - spent)
@@ -660,14 +728,14 @@ def execute_sell(asset_id, reason, fraction=1.0):
 
     if proceeds < 0:
         proceeds = 0.0  # a negative delta means someone else moved the cash
-    if price and qty and venue != "coinbase":
+    if price and qty and venue != "coinbase" and measured:
         # the exit half of the friction: realised per unit vs the print sold on
         journal.log_event("sell_friction", asset_id, {
-            "mid": price, "eff": proceeds / qty, "pct": round(proceeds / qty / price - 1, 4),
-            "measured": measured})
+            "mid": price, "eff": proceeds / qty, "pct": round(proceeds / qty / price - 1, 4)})
     if not measured:
-        alerts.ops(f"{alerts.symbol(asset_id)}: the chain did not report the sale's "
-                   f"proceeds; booked the quote's ${proceeds:.2f}. Check the wallet.")
+        alerts.ops(f"I sold {alerts.symbol(asset_id)} but could not confirm how much USDC "
+                   f"came back. I've booked an estimate of ${proceeds:.2f} for now (PNL "
+                   "will show it as an estimate); please check the wallet balance.")
     cash_venue = venue if venue == "coinbase" else chain
     state.set_cash(cash_venue, state.cash(cash_venue) + proceeds)
     # Book what actually left, not what we asked to leave. A partial fill on a
@@ -679,8 +747,13 @@ def execute_sell(asset_id, reason, fraction=1.0):
     else:
         # A swap is atomic: the requested share of the wallet balance left,
         # all of it. Booking by wallet units against booked units would turn
-        # a rounding drift into a phantom residual position.
+        # a rounding drift into a phantom residual position -- and a swap
+        # that took every unit the books know of closes the position,
+        # whatever fraction was asked for: what would remain is a negative
+        # row that no monitor guards and the next buy lands on top of.
         sold_share = min(fraction, 1.0)
+        if held and qty >= held * 0.999:
+            sold_share = 1.0
     cost_part = pos["cost_basis_usd"] * sold_share
     pnl = proceeds - cost_part
     # Prior partial exits on this life, read BEFORE this exit's own row is
@@ -690,7 +763,8 @@ def execute_sell(asset_id, reason, fraction=1.0):
     # One row per exit with the realised number: the PNL tally reads these.
     journal.log_event("exit_pnl", asset_id, {
         "pnl": round(pnl, 4), "proceeds": round(proceeds, 4), "cost": round(cost_part, 4),
-        "share": round(sold_share, 4), "reason": reason[:60],
+        "share": round(sold_share, 4), "reason": reason[:60], "tx": str(oid),
+        "entry_ts": pos.get("entry_ts"),
         **({} if measured else {"unmeasured": True})})
     if sold_share >= 0.999:
         # Judge the whole position life, not the closing slice: a ratchet that
@@ -709,7 +783,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
         ratchet.on_close(asset_id, pnl_total)
         state.close_position(asset_id)
     else:
-        state.upsert_position(asset_id, venue, chain, -qty, -cost_part)
+        state.upsert_position(asset_id, venue, chain, -min(qty, held), -cost_part)
         journal.log_event("partial_exit", asset_id,
                           {"requested": fraction, "sold_share": round(sold_share, 4)})
     journal.log_fill(client_oid=oid, asset_id=asset_id, side="sell", qty=qty,

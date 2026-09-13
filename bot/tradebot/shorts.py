@@ -267,7 +267,8 @@ def _cover(asset, fraction, reason):
     prior = _life_pnl(asset, r["entry_ts"])       # BEFORE this exit's own row
     journal.log_event("exit_pnl", asset, {"pnl": round(pnl, 4), "proceeds": round(cost + pnl, 4),
                                           "cost": round(cost, 4), "share": round(share, 4),
-                                          "reason": reason[:60], "short": True})
+                                          "reason": reason[:60], "short": True,
+                                          "entry_ts": r.get("entry_ts")})
     journal.log_fill(client_oid=str(oid), asset_id=asset, side="cover", qty=filled, price=px,
                      fee_usd=round(fee, 4), venue="hyperliquid", tx_ref=str(oid))
     remaining = r["qty"] - filled

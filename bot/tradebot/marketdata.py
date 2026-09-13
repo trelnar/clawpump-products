@@ -13,7 +13,15 @@ _info_cache = {}    # asset_id -> (pair info, ts) from the last token read
 
 
 def _get(url, **kw):
-    r = requests.get(url, timeout=kw.pop("timeout", 10), **kw)
+    """One GET; a 429 waits briefly and tries once more. The tracker reads
+    up to 150 tokens back to back every 5 minutes -- close to DexScreener's
+    ceiling -- and one throttled answer used to blank every read after it
+    in the pass."""
+    timeout = kw.pop("timeout", 10)
+    r = requests.get(url, timeout=timeout, **kw)
+    if r.status_code == 429:
+        time.sleep(float(r.headers.get("Retry-After") or 2))
+        r = requests.get(url, timeout=timeout, **kw)
     r.raise_for_status()
     return r.json()
 

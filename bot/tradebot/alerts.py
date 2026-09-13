@@ -77,18 +77,28 @@ def symbol(asset_id, lookup=True):
             try:
                 from . import marketdata
                 info = marketdata.dexscreener_token(kind, ident)
-                sym = (info or {}).get("base_symbol") or ""
+                sym = ((info or {}).get("base_symbol") or "").strip()
             except Exception:
                 sym = ""
-        sym = (sym or ident[:6]).strip()
+        if not sym:
+            # A failed lookup is not a name. Persisting the id fragment here
+            # meant one bad read at buy time named the token '7GCihg' in
+            # every message for good. Try again next time instead.
+            return ident[:6]
         state.set_kv(f"symbol:{asset_id}", sym)
     _symbol_cache[asset_id] = sym
     return sym
 
 
-def plain_reason(reason):
-    """Why a sell happened, in the operator's words."""
+def plain_reason(reason, short=False):
+    """Why a sell (or a cover, short=True) happened, in the operator's words."""
     r = (reason or "").lower()
+    if short:
+        return ("it hit the stop" if "stop" in r else
+                "it bounced off the low, so I banked it" if "ratchet floor" in r else
+                "it capitulated and turned, so I took the profit" if "ratchet take" in r else
+                "the thesis window ran out" if "window" in r else
+                "you asked me to flatten" if "flatten" in r else reason or "exit")
     if "invalidation" in r:
         return "it hit the stop"
     if "ratchet take" in r:
@@ -131,12 +141,7 @@ def covered(asset, pnl_usd, pnl_pct, reason, fraction, remaining_usd):
     sym = symbol(asset)
     verb = "a gain" if pnl_usd >= 0 else "a loss"
     part = "" if fraction >= 0.999 else f" {fraction:.0%} of"
-    r = (reason or "").lower()
-    why = ("it hit the stop" if "stop" in r else
-           "it bounced off the low, so I banked it" if "ratchet floor" in r else
-           "it capitulated and turned, so I took the profit" if "ratchet take" in r else
-           "the thesis window ran out" if "window" in r else
-           "you asked me to flatten" if "flatten" in r else reason)
+    why = plain_reason(reason, short=True)
     body = (f"I covered{part} my {sym} short for {verb} of ${abs(pnl_usd):.2f}"
             + (f" ({pnl_pct:+.0%})" if pnl_pct is not None else "") + f" because {why}.")
     if fraction < 0.999 and remaining_usd:
