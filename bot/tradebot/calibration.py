@@ -116,9 +116,15 @@ def _resolve(forecast_id):
 
 
 def _unsampled(r):
-    """Rows written before the samples column existed are judged by their
-    timestamps (never updated means last_ts is within a second of start_ts)."""
-    if r.keys() and "samples" in r.keys() and r["samples"] is not None:
+    """A forecast that was never observed inside its thesis window cannot
+    score the thesis: max_6h is only ever set by a sample inside the window,
+    so NULL there means the first look came too late (the pre-fix backlog
+    resolved this way, all at exactly 1.00x). Rows written before the samples
+    column existed are judged by their timestamps."""
+    keys = r.keys() if hasattr(r, "keys") else []
+    if "max_6h" in keys and r["max_6h"] is None:
+        return True
+    if "samples" in keys and r["samples"] is not None:
         return int(r["samples"]) == 0
     return (r["last_ts"] or 0) - (r["start_ts"] or 0) < 1.0
 
@@ -131,8 +137,9 @@ def purge_unsampled():
         c = journal.conn()
         cur = c.execute(
             "DELETE FROM outcomes WHERE forecast_id IN "
-            "(SELECT forecast_id FROM forecast_tracking WHERE COALESCE(samples,0) = 0 "
-            "AND last_ts - start_ts < 1.0)")
+            "(SELECT forecast_id FROM forecast_tracking WHERE max_6h IS NULL "
+            "AND (COALESCE(samples,0) = 0 OR last_ts - start_ts > ?))",
+            (config.P30_WINDOW_SEC,))
         n = cur.rowcount
         c.commit()
     if n:
