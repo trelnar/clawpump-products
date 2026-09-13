@@ -192,7 +192,12 @@ def research(candidates):
                    "`your_recent_calibration` is YOUR OWN record over the last two weeks, "
                    "per action: the mean p30 you stated against the share that actually "
                    "reached +30% within 6h (and p2x against 2x within 72h; peaks sampled "
-                   "every 15 min). Treat "
+                   "every 5 min). `target_before_stop_share` is the share whose +30% "
+                   "printed BEFORE a -15% did -- the trade as the core would have run it "
+                   "-- and `sim_pnl_per_10usd` is what a $10 position on each call "
+                   "would have made after friction; a high reached-+30% share with a "
+                   "low target-before-stop share means the path runs through the stop "
+                   "first, and the entry needs a dip, not a chase. Treat "
                    "it as the calibration step the strategy skill requires: if the share "
                    "of your PASSes that reached 2x is far above the p2x you gave them, "
                    "your probabilities are too low and your bar is set above what the "
@@ -281,8 +286,10 @@ def submit(cands):
         action = c["action"]
         # Track EVERY forecast, PASS included: what the bot declined is where
         # most of the calibration signal is, and observing it costs nothing.
+        # Scored from the market's print at the call, not the model's own
+        # entry_price: the thesis is measured against what the tape did.
         calibration.open_tracking(fid, aid, action,
-                                  c.get("entry_price") or marketdata.price(aid))
+                                  marketdata.price(aid) or c.get("entry_price"))
         chain = aid.split(":", 1)[0]
         venue = "coinbase" if chain == "cex" else chain
         plan = _plan_of(c)

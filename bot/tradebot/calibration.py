@@ -6,6 +6,7 @@ COMING_UPs are where most of the signal is, and they cost nothing to observe.
 Prices are sampled forward rather than fetched historically, so this works for
 any asset the bot can already mark.
 """
+import threading
 import time
 
 from . import config, journal, marketdata
@@ -54,26 +55,103 @@ def tick():
     marks, _ = marketdata.marks(assets) if assets else ({}, True)
     now = time.time()
     ratchet.track(marks, now)
-    updated = 0
+    updates, touched = [], set()
+    for r in rows:
+        px = marks.get(r["asset_id"])
+        if not px or px <= 0:
+            continue
+        updates.append(_advance(r, px, now))
+        touched.add(r["asset_id"])
     with journal._lock:
         c = journal.conn()
-        for asset, px in marks.items():
-            if not px or px > 0:
-                c.execute(
-                    "UPDATE forecast_tracking SET max_price=MAX(max_price,?), last_ts=?, "
-                    "max_6h=CASE WHEN ? - start_ts <= ? THEN MAX(COALESCE(max_6h,0),?) "
-                    "ELSE max_6h END, "
-                    "min_price=MIN(COALESCE(min_price,start_price),?), "
-                    "min_6h=CASE WHEN ? - start_ts <= ? THEN MIN(COALESCE(min_6h,start_price),?) "
-                    "ELSE min_6h END, samples=COALESCE(samples,0)+1 "
-                    "WHERE resolved=0 AND asset_id=?",
-                    (px, now, now, config.P30_WINDOW_SEC, px, px, now, config.P30_WINDOW_SEC, px, asset))
-                updated += 1
+        for u in updates:
+            c.execute(
+                "UPDATE forecast_tracking SET max_price=?, min_price=?, max_6h=?, min_6h=?, "
+                "end_6h=?, stop_ts=?, target_ts=?, last_ts=?, samples=COALESCE(samples,0)+1 "
+                "WHERE forecast_id=? AND resolved=0", u)
         c.commit()
     for r in rows:
         if now - r["start_ts"] >= config.TRACK_WINDOW_SEC:
             _resolve(r["forecast_id"])
-    return updated
+    return len(touched)
+
+
+_tick_thread = [None]
+
+
+def tick_async():
+    """tick() off the caller's thread. A pass marks up to TRACK_BATCH assets
+    at one HTTP read each -- a minute or more -- and it used to run inline
+    in the core loop, during which the 5-second position monitor did not.
+    A stop could fire late by exactly that long. Skips a pass while the
+    previous one is still running."""
+    t = _tick_thread[0]
+    if t is not None and t.is_alive():
+        return False
+
+    def _run():
+        try:
+            tick()
+        except Exception as e:
+            journal.log_event("track_error", detail=repr(e)[:200])
+    t = threading.Thread(target=_run, name="tracker", daemon=True)
+    _tick_thread[0] = t
+    t.start()
+    return True
+
+
+def _thresholds(asset_id):
+    """(target, stop, is_short) the thesis implies for this asset."""
+    if (asset_id or "").startswith("perp:"):
+        return config.HL_TARGET, config.HL_STOP_PCT, True
+    return config.P30_TARGET, config.STOP_LOSS_PCT, False
+
+
+def _advance(r, px, now):
+    """One sample against one open forecast: extremes over the whole horizon,
+    extremes and the last print inside the thesis window, and the FIRST time
+    the thesis's stop and target each printed. hit_30 says whether +30% was
+    ever there; stop_ts vs target_ts says whether the trade would have
+    reached it or been stopped out on the way. Those are different numbers,
+    and only the second one is money."""
+    start = r["start_price"] or 0
+    in_win = (now - (r["start_ts"] or 0)) <= config.P30_WINDOW_SEC
+    max_p = max(r["max_price"] or start, px)
+    min_p = min(r.get("min_price") or start, px)
+    max6, min6, end6 = r.get("max_6h"), r.get("min_6h"), r.get("end_6h")
+    stop_ts, target_ts = r.get("stop_ts"), r.get("target_ts")
+    if in_win:
+        max6 = max(max6 or 0, px)
+        min6 = min(min6 or start, px)
+        end6 = px
+        target, stop, short = _thresholds(r["asset_id"])
+        if start > 0:
+            hit_stop = px >= start * (1 + stop) if short else px <= start * (1 - stop)
+            hit_target = px <= start * (1 - target) if short else px >= start * (1 + target)
+            if hit_stop and stop_ts is None:
+                stop_ts = now
+            if hit_target and target_ts is None:
+                target_ts = now
+    return (max_p, min_p, max6, min6, end6, stop_ts, target_ts, now, r["forecast_id"])
+
+
+def _sim(r):
+    """The trade the thesis implies, played on the samples: the target banked
+    if it printed before the stop, the stop taken if it printed first, else
+    the move at the last print inside the window. Gross of friction; SCORE
+    subtracts SIM_FRICTION. Returns (result, return)."""
+    start = r["start_price"] or 0
+    target, stop, short = _thresholds(r["asset_id"])
+    st, tt = r.get("stop_ts"), r.get("target_ts")
+    if st and (not tt or st <= tt):
+        return "stop", -stop
+    if tt:
+        return "target", target
+    end = r.get("end_6h")
+    if end and start > 0:
+        ret = end / start - 1
+        return "flat", (-ret if short else ret)
+    return "flat", 0.0
 
 
 def _resolve(forecast_id):
@@ -101,6 +179,7 @@ def _resolve(forecast_id):
         hit30 = int(bool(low6 and start > 0 and low6 / start <= 1 - config.HL_TARGET))
     else:
         hit30 = int(bool(m6 and m6 >= 1 + config.P30_TARGET))
+    sim_result, sim_ret = _sim(r)
     journal.log_outcome(forecast_id=forecast_id, max_multiple=mult,
                         hit_30=hit30,
                         hit_2x=int(bool(mult and mult >= 2)),
@@ -108,7 +187,8 @@ def _resolve(forecast_id):
                         hit_5x=int(bool(mult and mult >= 5)),
                         hit_10x=int(bool(mult and mult >= 10)),
                         exit_result=r["action"], realized_pnl_usd=None,
-                        slippage_vs_plan=None)
+                        slippage_vs_plan=None,
+                        sim_result=sim_result, sim_return=round(sim_ret, 4))
     with journal._lock:
         journal.conn().execute(
             "UPDATE forecast_tracking SET resolved=1 WHERE forecast_id=?", (forecast_id,))
@@ -154,17 +234,28 @@ def scorecard(days=30):
     since = time.time() - days * 86400
     rows = journal.query(
         "SELECT t.action a, COUNT(*) n, AVG(o.max_multiple) avg_mult, "
-        "SUM(o.hit_30) h30, SUM(o.hit_2x) h2, SUM(o.hit_3x) h3, SUM(o.hit_5x) h5 "
+        "SUM(o.hit_30) h30, SUM(o.hit_2x) h2, SUM(o.hit_3x) h3, SUM(o.hit_5x) h5, "
+        "SUM(CASE WHEN o.sim_result='target' THEN 1 ELSE 0 END) won, "
+        "SUM(CASE WHEN o.sim_result='stop' THEN 1 ELSE 0 END) stopped, "
+        "SUM(CASE WHEN o.sim_result IS NOT NULL THEN 1 ELSE 0 END) n_sim, "
+        "AVG(o.sim_return) sim_ret "
         "FROM outcomes o JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
         "WHERE o.ts > ? GROUP BY t.action ORDER BY n DESC", (since,))
     if not rows:
         return f"No forecasts have resolved yet (window {config.TRACK_WINDOW_SEC/3600:.0f}h)."
-    out = [f"SCORECARD {days}d — resolved forecasts by the action taken"]
+    out = [f"SCORECARD {days}d — resolved forecasts by the action taken "
+           f"({config.TRACK_INTERVAL_SEC // 60}-min samples)"]
     for r in rows:
         n = r["n"] or 1
-        out.append(f"{r['a'] or '?':10s} n={r['n']:4d}  +30%/6h {100*(r['h30'] or 0)/n:4.0f}%  "
-                   f"peak {r['avg_mult'] or 0:.2f}x  2x {100*(r['h2'] or 0)/n:4.0f}%  "
-                   f"3x {100*(r['h3'] or 0)/n:4.0f}%")
+        out.append(f"{r['a'] or '?'} n={r['n']}: +30%/6h {100*(r['h30'] or 0)/n:.0f}%, "
+                   f"peak {r['avg_mult'] or 0:.2f}x, 2x {100*(r['h2'] or 0)/n:.0f}%")
+        ns = r["n_sim"] or 0
+        if ns:
+            won, stopped = (r["won"] or 0), (r["stopped"] or 0)
+            per10 = 10 * ((r["sim_ret"] or 0) - config.SIM_FRICTION)
+            out.append(f"  as $10 trades ({ns}): won {100*won/ns:.0f}%, stopped "
+                       f"{100*stopped/ns:.0f}%, flat {100*(ns-won-stopped)/ns:.0f}% -> "
+                       f"${per10:+.2f} each after {config.SIM_FRICTION:.0%} friction")
     return "\n".join(out)
 
 
@@ -178,7 +269,11 @@ def feedback(days=14):
     rows = journal.query(
         "SELECT t.action a, COUNT(*) n, AVG(f.p2x) stated, AVG(o.hit_2x) hit2, "
         "AVG(f.p30) stated30, AVG(o.hit_30) hit30, "
-        "AVG(o.hit_3x) hit3, AVG(o.max_multiple) peak "
+        "AVG(o.hit_3x) hit3, AVG(o.max_multiple) peak, "
+        "AVG(CASE WHEN o.sim_result='target' THEN 1.0 WHEN o.sim_result IS NULL THEN NULL "
+        "ELSE 0.0 END) won, "
+        "AVG(CASE WHEN o.sim_result='stop' THEN 1.0 WHEN o.sim_result IS NULL THEN NULL "
+        "ELSE 0.0 END) stopped, AVG(o.sim_return) sim_ret "
         "FROM outcomes o JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
         "JOIN forecasts f ON f.forecast_id=o.forecast_id "
         "WHERE o.ts > ? GROUP BY t.action", (since,))
@@ -186,7 +281,7 @@ def feedback(days=14):
     for r in rows:
         if not r["n"]:
             continue
-        out[r["a"] or "?"] = {
+        d = {
             "resolved": r["n"],
             "stated_p30_mean": round(r["stated30"] or 0, 3),
             "reached_30pct_in_6h_share": round(r["hit30"] or 0, 3),
@@ -195,6 +290,12 @@ def feedback(days=14):
             "reached_3x_share": round(r["hit3"] or 0, 3),
             "peak_multiple_mean": round(r["peak"] or 0, 2),
         }
+        if r["sim_ret"] is not None:
+            # the thesis as a trade: target banked before the stop printed?
+            d["target_before_stop_share"] = round(r["won"] or 0, 3)
+            d["stopped_first_share"] = round(r["stopped"] or 0, 3)
+            d["sim_pnl_per_10usd"] = round(10 * (r["sim_ret"] - config.SIM_FRICTION), 2)
+        out[r["a"] or "?"] = d
     return out
 
 

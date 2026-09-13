@@ -1,5 +1,7 @@
 """bot-core daemon (runtime skill, deterministic layer). Owns execution, risk,
 state, Telegram, monitoring, heartbeat. No model calls anywhere in here."""
+import json
+import threading
 import time
 
 from . import (alerts, approval, calibration, config, execution, heartbeat,
@@ -133,7 +135,53 @@ def pnl_text(arg=None):
              f"Net      : ${net:+.2f}"]
     cash = sum(state.cash().values())
     lines.append(f"Cash now : ${cash:.2f} across venues")
+    fr = {r["kind"]: r for r in journal.query(
+        "SELECT kind, AVG(json_extract(detail,'$.pct')) p, COUNT(*) n FROM events "
+        "WHERE kind IN ('buy_friction','sell_friction') AND ts > ? GROUP BY kind", (since,))}
+    if fr:
+        b = fr.get("buy_friction", {}).get("p") or 0
+        sl = fr.get("sell_friction", {}).get("p") or 0
+        lines.append(f"Friction : ~{max(b, 0) + max(-sl, 0):.1%} per round trip "
+                     f"(entry {b:+.1%}, exit {sl:+.1%})")
+    lines += last_exits_lines(since)
     return "\n".join(lines)
+
+
+def last_exits_lines(since, limit=None):
+    """One line per recent exit: when, what, the money, how long it was held,
+    and why it was sold. An aggregate hid five stop-outs behind one number."""
+    limit = limit or config.PNL_LAST_EXITS
+    rows = journal.query("SELECT ts, asset_id, detail FROM events WHERE kind='exit_pnl' "
+                         "AND ts > ? ORDER BY ts DESC LIMIT ?", (since, limit))
+    if not rows:
+        return []
+    out = ["Last exits (UTC):"]
+    for r in rows:
+        try:
+            d = json.loads(r["detail"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        pnl, cost = float(d.get("pnl") or 0), float(d.get("cost") or 0)
+        pct = f" ({pnl / cost:+.0%})" if cost else ""
+        buy = journal.query("SELECT ts FROM fills WHERE asset_id=? AND side IN ('buy','short') "
+                            "AND ts <= ? ORDER BY ts DESC LIMIT 1",
+                            (r["asset_id"], r["ts"] + 5))
+        held = ""
+        if buy:
+            h = (r["ts"] - buy[0]["ts"]) / 3600
+            held = f" after {h * 60:.0f}m" if h < 1 else f" after {h:.1f}h"
+        tag = ""
+        if d.get("unmeasured"):
+            tag = " (estimate)"
+        elif d.get("repaired"):
+            tag = f" (corrected from ${float(d.get('pnl_before_repair') or 0):+.2f})"
+        share = float(d.get("share") or 1)
+        part = "" if share >= 0.999 else f" {share:.0%} of"
+        when = time.strftime("%m-%d %H:%M", time.gmtime(r["ts"]))
+        out.append(f"  {when}{part} {alerts.symbol(r['asset_id'], lookup=False)}: "
+                   f"${pnl:+.2f}{pct}{held}, "
+                   f"{alerts.plain_reason(d.get('reason'))}{tag}")
+    return out
 
 
 def ratchet_text(arg=None):
@@ -334,6 +382,13 @@ def _report_fatal_agent_error(since_ts):
     return False
 
 
+def _quiet(fn):
+    try:
+        fn()
+    except Exception as e:
+        journal.log_event("background_task_error", detail=f"{fn.__name__}: {e!r}"[:200])
+
+
 def main():
     state.init()
     from .signals import store as _sigstore
@@ -361,6 +416,10 @@ def main():
     holder = {"p": telegram.Poller(cmds.handle)}
     holder["p"].start()
     alerts.ops(f"bot-core started. Mode {state.get_mode()}, phase {state.phase()}.")
+    # Past exits booked at $0 proceeds are re-read from their transactions.
+    # Network reads: off the loop, and never fatal.
+    threading.Thread(target=lambda: _quiet(execution.repair_zero_proceeds),
+                     name="exit-repair", daemon=True).start()
 
     last = {"hb": 0, "value": 0, "monitor": 0, "tg": 0, "track": 0,
             "posrecon": 0, "agentwatch": 0}
@@ -390,7 +449,7 @@ def main():
                 supervise_auto()
                 last["agentwatch"] = now
             if now - last["track"] >= config.TRACK_INTERVAL_SEC:
-                calibration.tick()
+                calibration.tick_async()      # off the loop: the monitor keeps its 5s
                 last["track"] = now
             if now - last["posrecon"] >= config.RECON_POSITIONS_SEC:
                 monitor.reconcile_positions()

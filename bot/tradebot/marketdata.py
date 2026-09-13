@@ -9,6 +9,7 @@ import requests
 from . import config, journal
 
 _price_cache = {}   # asset_id -> (price, ts)
+_info_cache = {}    # asset_id -> (pair info, ts) from the last token read
 
 
 def _get(url, **kw):
@@ -64,6 +65,7 @@ def dexscreener_token(chain, address):
     liq = lambda p: (p.get("liquidity") or {}).get("usd") or 0  # noqa: E731
     as_base = [p for p in pairs if _same_addr((p.get("baseToken") or {}).get("address"), address)]
     as_quote = [p for p in pairs if _same_addr((p.get("quoteToken") or {}).get("address"), address)]
+    inverted = False
     if as_base:
         best, px = max(as_base, key=liq), None
         px = float(best.get("priceUsd") or 0)
@@ -72,13 +74,28 @@ def dexscreener_token(chain, address):
         base_usd = float(best.get("priceUsd") or 0)
         base_in_ours = float(best.get("priceNative") or 0)
         px = (base_usd / base_in_ours) if base_in_ours > 0 else 0.0
+        inverted = True
     else:
         return None
     m5 = (best.get("txns") or {}).get("m5") or {}
+    chg = best.get("priceChange") or {}
+
+    def _pct(k):
+        """priceChange is the BASE token's move in percent. When we are the
+        quote, our move is the inverse: base +25% is ours -20%."""
+        try:
+            v = float(chg[k]) if chg.get(k) is not None else None
+        except (TypeError, ValueError):
+            return None
+        if v is None or not inverted:
+            return v
+        return (100.0 / (1 + v / 100.0) - 100.0) if v > -100 else None
     return {
         "price": px,
         "buys_m5": int(m5.get("buys") or 0),
         "sells_m5": int(m5.get("sells") or 0),
+        "change_m5": _pct("m5"),      # percent, as DexScreener reports it
+        "change_h1": _pct("h1"),
         "liquidity_usd": float((best.get("liquidity") or {}).get("usd") or 0),
         "volume_h24": float((best.get("volume") or {}).get("h24") or 0),
         "pair_address": best.get("pairAddress"),
@@ -89,9 +106,12 @@ def dexscreener_token(chain, address):
     }
 
 
-def price(asset_id):
-    """asset_id formats: 'cex:SOL-USDC' or 'solana:<mint>' or 'base:0x..'."""
+def price_info(asset_id):
+    """(price, pair info) in one read. The info is the DexScreener pair dict
+    for tokens (5-minute move, flow, liquidity) and None for CEX/perp assets.
+    The buy gates need both and used to pay for two reads to get them."""
     kind, _, ident = asset_id.partition(":")
+    info = None
     try:
         if kind == "cex":
             p = coinbase_spot(ident)
@@ -104,13 +124,30 @@ def price(asset_id):
         # A missing priceUsd used to come back as 0.0, which the monitor read
         # as a real price below every invalidation level and sold into. Zero is
         # not a price; it is a blind read, and blind is what None means here.
+        if info:
+            _info_cache[asset_id] = (info, time.time())
         if not p or p <= 0:
-            return None
+            return None, info
         _price_cache[asset_id] = (p, time.time())
-        return p
+        return p, info
     except Exception as e:
         journal.log_event("price_fetch_fail", asset_id, str(e))
-        return None
+        return None, None
+
+
+def price(asset_id):
+    """asset_id formats: 'cex:SOL-USDC' or 'solana:<mint>' or 'base:0x..'."""
+    return price_info(asset_id)[0]
+
+
+def last_info(asset_id, max_age=60):
+    """The pair info that came with the most recent price read, if it is
+    recent enough to describe the market now. None for CEX/perp assets and
+    for anything not read within `max_age` seconds."""
+    v = _info_cache.get(asset_id)
+    if v and time.time() - v[1] <= max_age:
+        return v[0]
+    return None
 
 
 _last_tick = {}     # asset_id -> (price, ts of last FRESH print)

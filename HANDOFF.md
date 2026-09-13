@@ -59,6 +59,18 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   adds and sells are automatic. `AUTO <hours>` (confirmed with a code, max 72h, `AUTO OFF`)
   makes new buys execute without a tap for that long; every other gate, cap and cooldown
   still applies, and the core says when it expires.
+- **Exit accounting and entry timing** (2026-09-13). A sell's proceeds are booked from the
+  swap's own transaction (`tx_token_delta`), then a re-read balance, then the quote flagged
+  `unmeasured` — never a lagging wallet read that books a $10 exit as $0 (a phantom −100%).
+  Exits already booked that way are corrected from the chain at every core start
+  (`repair_zero_proceeds`) and `PNL` marks them `corrected`. `PNL` now lists the last eight
+  exits (hold time, %, reason) and the measured round-trip friction. Buys **defer** while the
+  token's 5-minute move is ≤ −5% (falling knife) or ≥ +30% (the leg already happened): the
+  ticket is retried every minute until it ages out at 15 min (`ENTRY_M5_MIN_PCT`,
+  `ENTRY_M5_MAX_PCT`). Gate 4's round-trip allowance is 5% (`ROUNDTRIP_LOSS_MAX`, was 9%).
+  `SCORE` reports, per action, the thesis *as a trade*: won (+30% printed before −15%),
+  stopped, flat, and the simulated P&L per $10 after `SIM_FRICTION`. The tracker samples
+  every 5 min in its own thread (it used to block the position monitor for a minute).
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).
@@ -170,7 +182,12 @@ are systematically optimistic for exactly the tokens this bot hunts.
 `REPORT`, `SCORE [days]`, `GAPS [days]`, `WHY <asset>`, `YES <code>` / `NO <code>`.
 
 - `SCORE` — what forecasts predicted vs what happened, split by the action taken.
-  Empty until the first forecasts resolve (72h horizon).
+  Empty until the first forecasts resolve (72h horizon). The `as $10 trades` line is the
+  one that answers "does the method work": won = +30% printed before −15% did; stopped =
+  the reverse; the dollar figure is per $10 position after friction.
+- `PNL [days]` — realised, open, API cost, net, cash; then friction and the last exits one
+  per line with hold time and the reason. `(estimate)` = the chain did not report the
+  sale's proceeds; `(corrected from …)` = a past exit re-read from its transaction.
 - `SCORE`/`GAPS` need the research layer running; if it is silent for 45 minutes the
   core now says so unprompted (it holds no Telegram credentials of its own).
 - `GAPS` — why it is not trading: PASS reasons, and the evidence the model says it
@@ -248,3 +265,11 @@ The design principle throughout: **the model decides, code enforces.** No model 
 raise a limit, skip an approval, or size a position. Where the audit found that principle
 violated, those were the highest-value fixes: §3b C1-C3 and the §3c gate bypass are closed.
 The exits cluster is closed too; what it now needs is a live position to prove it.
+
+2026-09-13: the first AUTO buys all lost. One stopped out two minutes after the fill, at
+−19% on a −15% stop; the 30-day tally said 5 exits, 0 winners, −$25.95 on $10 trades, which
+no −15% stop produces. The sell path booked proceeds from one wallet read taken right after
+confirmation; when that read lagged, the exit booked as a total loss. Now booked from the
+transaction. The same day added the entry-timing deferral, the per-trade `PNL` lines and
+the stop-first simulation in `SCORE`, so the next few days of forecasts say whether the
+thesis has an edge without spending stops to find out.

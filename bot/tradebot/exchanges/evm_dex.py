@@ -237,6 +237,47 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
     return h
 
 
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+
+def _hex(x):
+    """'0x..' string for a HexBytes, bytes or str log field."""
+    if isinstance(x, (bytes, bytearray)):
+        return "0x" + bytes(x).hex()
+    h = str(x)
+    return h if h.startswith("0x") else "0x" + h
+
+
+@_with_fallback
+def tx_token_delta(tx_hash, token, owner=None, decimals=None):
+    """Net `token` moved to (positive) or from (negative) `owner` by one mined
+    transaction, in whole units, read from the receipt's Transfer logs. See
+    solana_dex.tx_token_delta for why proceeds are booked from this and not
+    from a wallet balance read. None when there is no receipt yet."""
+    w3 = _w3()
+    owner = (owner or address()).lower()
+    rec = w3.eth.get_transaction_receipt(tx_hash)
+    if not rec or rec.get("status") != 1:
+        return None
+    if decimals is None:
+        c = w3.eth.contract(address=w3.to_checksum_address(token), abi=ERC20_ABI)
+        decimals = c.functions.decimals().call()
+    raw = 0
+    for lg in rec.get("logs") or []:
+        if str(lg.get("address", "")).lower() != token.lower():
+            continue
+        topics = [_hex(t) for t in (lg.get("topics") or [])]
+        if len(topics) < 3 or topics[0].lower() != TRANSFER_TOPIC:
+            continue
+        src, dst = "0x" + topics[1][-40:].lower(), "0x" + topics[2][-40:].lower()
+        value = int(_hex(lg.get("data") or "0x0"), 16)
+        if dst == owner:
+            raw += value
+        if src == owner:
+            raw -= value
+    return raw / (10 ** decimals)
+
+
 @_with_fallback
 def confirm(tx_hash):
     """'unknown' means still pending. A throttled RPC is NOT 'unknown' -- it

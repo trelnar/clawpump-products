@@ -286,6 +286,44 @@ def swap(input_mint, output_mint, amount_raw, slippage_bps):
     return sig, q
 
 
+def _ui_amount(tb):
+    ui = tb.get("uiTokenAmount") or {}
+    v = ui.get("uiAmountString")
+    if v in (None, ""):
+        v = ui.get("uiAmount")
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def tx_token_delta(signature, mint, owner=None):
+    """How much of `mint` one confirmed transaction moved into (positive) or
+    out of (negative) `owner`'s accounts, in whole units, from the
+    transaction's own pre/post token balances.
+
+    This is the fact a sell's proceeds should be booked from. The wallet
+    balance read that used to stand in for it can lag the confirmation --
+    the buy side already re-reads for that reason -- and a lagging read
+    books a $10 exit as $0 proceeds: a phantom -100% loss, an approval
+    revoked, and a PNL that is wrong for good. Returns None when the node
+    does not have the transaction (yet); the caller falls back."""
+    owner = owner or address()
+    res = _rpc("getTransaction", [signature, {
+        "encoding": "jsonParsed", "commitment": "confirmed",
+        "maxSupportedTransactionVersion": 0}])
+    if not res:
+        return None
+    meta = res.get("meta") or {}
+    if meta.get("err"):
+        return None
+
+    def total(rows):
+        return sum(_ui_amount(b) for b in (rows or [])
+                   if b.get("mint") == mint and b.get("owner") == owner)
+    return total(meta.get("postTokenBalances")) - total(meta.get("preTokenBalances"))
+
+
 def confirm(signature):
     """Query-before-retry: a dropped tx can still land later."""
     res = _rpc("getSignatureStatuses", [[signature], {"searchTransactionHistory": True}])

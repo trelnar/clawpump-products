@@ -7,9 +7,13 @@ from . import config, journal, state
 
 
 class Reject(Exception):
-    def __init__(self, rule, detail=""):
+    """A gate refusal. `defer=True` means 'not now, not never': the ticket is
+    left as it is and the gates run again on the next pass, until the ticket
+    itself ages out."""
+    def __init__(self, rule, detail="", defer=False):
         self.rule = rule
         self.detail = detail
+        self.defer = defer
         super().__init__(f"{rule}: {detail}")
 
 

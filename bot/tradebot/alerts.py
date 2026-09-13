@@ -58,9 +58,11 @@ def sell_alert(asset, price, reason, pnl_pct=None):
 _symbol_cache = {}
 
 
-def symbol(asset_id):
+def symbol(asset_id, lookup=True):
     """A name a person recognises: the token's ticker, or the Coinbase base
-    currency. Cached in kv so a closed position still reads by name."""
+    currency. Cached in kv so a closed position still reads by name.
+    lookup=False never touches the network (for the Telegram thread, where
+    a slow read per line would stall the listener) and does not cache."""
     if asset_id in _symbol_cache:
         return _symbol_cache[asset_id]
     from . import state
@@ -69,6 +71,8 @@ def symbol(asset_id):
     if not sym:
         if kind in ("cex", "perp"):
             sym = ident.split("-")[0]
+        elif not lookup:
+            return ident[:6]
         else:
             try:
                 from . import marketdata

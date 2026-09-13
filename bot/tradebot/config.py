@@ -203,6 +203,16 @@ GAS_EXITS_FLOOR = 20             # native-token float sized for N exits
 GAS_COST_PER_EXIT = {"solana": 0.0008, "base": 0.00004}  # native units, one swap
 DUST_USD = 1.00                  # below this a position is genuinely dust
 ROUNDTRIP_COST_MAX = 0.03        # gas-aware minimum-position rule
+# Gate 4 measured a buy quote and an immediate sell quote and allowed the pair
+# to lose 9% (3x ROUNDTRIP_COST_MAX). On a +30%/-15% trade a 9% round trip is
+# a third of the win and a 60% wider loss. A legitimate pool costs 1-3%.
+ROUNDTRIP_LOSS_MAX = float(env("ROUNDTRIP_LOSS_MAX", "0.05"))
+# Entry timing (2026-09-13): a call that is being sold into right now is a
+# falling knife, and one that did +30% in the last five minutes is the leg we
+# missed. Either DEFERS the ticket -- retried every pass until it ages out --
+# rather than blocking it. Percent, as DexScreener reports priceChange.m5.
+ENTRY_M5_MIN_PCT = float(env("ENTRY_M5_MIN_PCT", "5"))    # skip while the 5-min move <= -5%
+ENTRY_M5_MAX_PCT = float(env("ENTRY_M5_MAX_PCT", "30"))   # skip while the 5-min move >= +30%
 MONITOR_INTERVAL_TOKEN_SEC = 5
 MONITOR_INTERVAL_CEX_SEC = 10
 VALUE_SAMPLE_SEC = 60            # rolling value series sampling
@@ -221,7 +231,9 @@ AGENT_STALE_SEC = 4500           # no completed research cycle -> alert (2.5 cyc
 AGENT_WATCHDOG_SEC = 300
 TRACK_WINDOW_SEC = 72 * 3600     # forecast resolution horizon (1-3 day thesis)
 TRACK_BATCH = 150                # distinct ASSETS marked per pass, youngest forecasts first
-TRACK_INTERVAL_SEC = 900
+TRACK_INTERVAL_SEC = 300         # tracker runs off the main loop (2026-09-13); 5-min samples
+SIM_FRICTION = float(env("SIM_FRICTION", "0.04"))   # round-trip cost assumed by SCORE's sim P&L
+PNL_LAST_EXITS = 8               # per-trade lines at the bottom of PNL
 RECON_POSITIONS_SEC = 1800       # position-vs-venue reconciliation
 POSITION_DRIFT_PCT = 0.02        # book vs venue mismatch worth alerting on
 TIME_STOP_SLACK = 1.5            # reassess at this multiple of the predicted window

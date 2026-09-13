@@ -59,7 +59,12 @@ def _migrate():
                              ("forecast_tracking", "max_6h", "REAL"),
                              ("forecast_tracking", "samples", "INTEGER DEFAULT 0"),
                              ("forecast_tracking", "min_price", "REAL"),
-                             ("forecast_tracking", "min_6h", "REAL")):
+                             ("forecast_tracking", "min_6h", "REAL"),
+                             ("forecast_tracking", "stop_ts", "REAL"),
+                             ("forecast_tracking", "target_ts", "REAL"),
+                             ("forecast_tracking", "end_6h", "REAL"),
+                             ("outcomes", "sim_result", "TEXT"),
+                             ("outcomes", "sim_return", "REAL")):
         cols = {r["name"] for r in journal.query(f"PRAGMA table_info({table})")}
         if col not in cols:
             with journal._lock:
@@ -108,6 +113,12 @@ def set_kv(k, v):
         journal.conn().execute(
             "INSERT INTO kv (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (k, str(v)))
+        journal.conn().commit()
+
+
+def del_kv(k):
+    with journal._lock:
+        journal.conn().execute("DELETE FROM kv WHERE k=?", (k,))
         journal.conn().commit()
 
 

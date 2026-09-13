@@ -16,6 +16,9 @@ def _gates_buy(ticket, total_value, marks_fresh):
         raise risk.Reject("halt", state.get_mode())
     # gate 2: stale data / ticket age
     if time.time() - ticket["ts"] > config.TICKET_MAX_AGE_SEC:
+        if state.get_kv(_defer_key(ticket)):
+            raise risk.Reject("waited_out", "the 5-minute move never settled inside "
+                              f"the call's {config.TICKET_MAX_AGE_SEC // 60} min")
         raise risk.Reject("stale_ticket", f"age {int(time.time()-ticket['ts'])}s")
     ref = marketdata.price(ticket["asset_id"])
     if ref is None:
@@ -23,6 +26,8 @@ def _gates_buy(ticket, total_value, marks_fresh):
     lo, hi = ticket.get("buy_zone_lo"), ticket.get("buy_zone_hi")
     if lo and hi and not (lo <= ref <= hi):
         raise risk.Reject("out_of_zone", f"price {ref} not in [{lo},{hi}]")
+    # gate 2b: entry timing -- from the same read, no second call
+    _entry_timing(ticket, marketdata.last_info(ticket["asset_id"]))
     # gate 3: risk-limits (includes fat-finger + cash)
     notional = ticket["notional_usd"]
     risk.check_buy(ticket["asset_id"], ticket["venue"], ticket.get("chain"),
@@ -45,10 +50,13 @@ def _gates_buy(ticket, total_value, marks_fresh):
         ok, reason, measured = mod.exit_safety(addr, notional)
         if not ok:
             raise risk.Reject("exit_safety", reason or "failed")
-        # gas-aware minimum: round-trip cost within cap of notional
+        # A buy quote and an immediate sell quote of what it returns: the
+        # cost of being wrong before the market has moved at all. 9% was
+        # allowed here; on a +30%/-15% trade that is a third of the win.
         loss = measured.get("roundtrip_loss", 0)
-        if loss > config.ROUNDTRIP_COST_MAX * 3:  # tolerance: quotes bundle slippage
-            raise risk.Reject("roundtrip_cost", f"{loss:.1%}")
+        if loss > config.ROUNDTRIP_LOSS_MAX:
+            raise risk.Reject("roundtrip_cost",
+                              f"{loss:.1%} > {config.ROUNDTRIP_LOSS_MAX:.0%}")
         _check_gas(chain)
     return ref
 
@@ -68,22 +76,67 @@ def _check_gas(chain):
             f"needs {floor:.6g} for {config.GAS_EXITS_FLOOR} exits")
 
 
+def _defer_key(ticket):
+    return f"defer:{ticket['ticket_id']}"
+
+
+def _entry_timing(ticket, info):
+    """Not while it is being sold into, and not on the leg we already missed.
+
+    The first AUTO buys of 2026-09-13 went in as their tokens were dumping:
+    one stopped out two minutes after the fill, the other was 20% below its
+    zone by the time the gates ran. Both were correct calls on a chart from a
+    few minutes earlier. A 5-minute move of -5% or worse means the sellers
+    are still there; +30% or more in five minutes is the move the thesis
+    wanted, already happened. Either DEFERS: the ticket is left as it is and
+    tried again on the next pass, until it ages out at TICKET_MAX_AGE_SEC."""
+    if ticket.get("chain") not in ("solana", "base") or not info:
+        return
+    m5 = info.get("change_m5")
+    if m5 is None:
+        return
+    if m5 <= -config.ENTRY_M5_MIN_PCT:
+        raise risk.Reject("falling_knife",
+                          f"down {abs(m5):.0f}% in the last 5 min", defer=True)
+    if m5 >= config.ENTRY_M5_MAX_PCT:
+        raise risk.Reject("spiking",
+                          f"up {m5:.0f}% in the last 5 min", defer=True)
+
+
+DEFERRED = object()   # _run_gates: 'not now'; the ticket is untouched
+
+
 def _run_gates(ticket, total_value, marks_fresh):
-    """Gates 1-4. Returns the reference price, or None having logged and
-    alerted the rejection."""
+    """Gates 1-4. Returns the reference price; DEFERRED when a gate asked for
+    the next pass; or None having logged and alerted the rejection."""
     asset = ticket["asset_id"]
     try:
-        return _gates_buy(ticket, total_value, marks_fresh)
+        ref = _gates_buy(ticket, total_value, marks_fresh)
     except risk.Reject as rj:
+        if rj.defer:
+            key = _defer_key(ticket)
+            if not state.get_kv(key):
+                state.set_kv(key, f"{time.time():.0f}")
+                journal.log_event("ticket_deferred", asset,
+                                  {"rule": rj.rule, "detail": rj.detail})
+                left = max(0, int((ticket["ts"] + config.TICKET_MAX_AGE_SEC - time.time()) / 60))
+                alerts.ops(f"Not buying {alerts.symbol(asset)} yet: {rj.detail}. I retry "
+                           f"every minute for up to {left} min and buy once it settles.")
+            return DEFERRED
         risk.log_reject(asset, rj)
         state.set_ticket_status(ticket["ticket_id"], f"blocked:{rj.rule}")
         alerts.not_bought(asset, rj.rule, rj.detail)
+        state.del_kv(_defer_key(ticket))
         return None
+    state.del_kv(_defer_key(ticket))
+    return ref
 
 
 def process_ticket(ticket, total_value, marks_fresh):
     """Called by core for each new BUY NOW ticket. Returns disposition."""
     ref = _run_gates(ticket, total_value, marks_fresh)
+    if ref is DEFERRED:
+        return "deferred"
     if ref is None:
         return "blocked"
     # A ratchet winner stays whitelisted, so its pause must come before the
@@ -134,6 +187,8 @@ def execute_approved(ticket, total_value, marks_fresh):
     against the state at the moment of the tap, which may be minutes and one
     STOP later than the alert that asked for it."""
     ref = _run_gates(ticket, total_value, marks_fresh)
+    if ref is DEFERRED:
+        return "deferred"
     if ref is None:
         return "blocked"
     return execute_buy(ticket, ref)
@@ -316,6 +371,94 @@ def _settled_qty(read_raw, before, decimals, fallback_raw=0):
     raise RuntimeError(f"swap confirmed but quantity unreadable: {last_err}")
 
 
+def _measure_proceeds(read_delta, read_balance, before, estimate):
+    """Proceeds of a sell that has ALREADY confirmed, in order of trust.
+
+    1. The transaction's own token-balance change (exact; immune to a lagging
+       node and to any other flow on the wallet).
+    2. The wallet balance, re-read until it rises above `before`.
+    3. The quote's estimate, flagged unmeasured -- never a silent zero.
+
+    A single balance read stood here. When it lagged the confirmation it
+    booked $0 proceeds: a -100% exit that was not one, an approval revoked
+    over it, and a realised PNL nobody could trust."""
+    try:
+        d = read_delta()
+        if d is not None and d > 0:
+            return float(d), True
+    except Exception as e:
+        journal.log_event("proceeds_tx_read_fail", detail=str(e)[:120])
+    last_err = None
+    for attempt in range(config.SETTLE_READ_TRIES):
+        try:
+            after = read_balance()
+            if after > before:
+                return after - before, True
+        except Exception as e:
+            last_err = e
+        if attempt + 1 < config.SETTLE_READ_TRIES:
+            time.sleep(config.SETTLE_READ_SLEEP_SEC)
+    journal.log_event("proceeds_unresolved",
+                      detail=f"{last_err}" if last_err else "balance unchanged")
+    return float(estimate or 0), False
+
+
+def repair_zero_proceeds(days=30):
+    """Exits booked with $0 proceeds are re-read from their transaction.
+
+    Before _measure_proceeds, a sell whose balance read lagged was booked as
+    a total loss. The chain still has the truth: the sell's own transaction.
+    Rewrites the exit_pnl row in place (keeping the old number), logs each
+    correction, tells the operator once. Safe to run at every start."""
+    since = time.time() - days * 86400
+    rows = journal.query("SELECT event_id, ts, asset_id, detail FROM events "
+                         "WHERE kind='exit_pnl' AND ts>? ORDER BY ts", (since,))
+    fixed = []
+    for r in rows:
+        try:
+            d = json.loads(r["detail"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if (d.get("proceeds") or 0) > 0 or d.get("repaired"):
+            continue
+        asset = r["asset_id"] or ""
+        chain = asset.split(":", 1)[0]
+        if chain not in ("solana", "base"):
+            continue
+        f = journal.query("SELECT tx_ref FROM fills WHERE asset_id=? AND side='sell' "
+                          "AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 1",
+                          (asset, r["ts"] - 600, r["ts"] + 600))
+        if not f or not f[0]["tx_ref"]:
+            continue
+        try:
+            if chain == "solana":
+                delta = solana_dex.tx_token_delta(f[0]["tx_ref"], solana_dex.USDC_MINT)
+            else:
+                delta = evm_dex.tx_token_delta(f[0]["tx_ref"], evm_dex.USDC)
+        except Exception as e:
+            journal.log_event("exit_repair_fail", asset, str(e)[:120])
+            continue
+        if not delta or delta <= 0:
+            continue
+        cost = float(d.get("cost") or 0)
+        old = float(d.get("pnl") or 0)
+        d.update({"proceeds": round(delta, 4), "pnl": round(delta - cost, 4),
+                  "repaired": True, "pnl_before_repair": old})
+        d.pop("unmeasured", None)
+        with journal._lock:
+            journal.conn().execute("UPDATE events SET detail=? WHERE event_id=?",
+                                   (json.dumps(d), r["event_id"]))
+            journal.conn().commit()
+        journal.log_event("exit_pnl_repaired", asset,
+                          {"was": old, "now": round(delta - cost, 4), "tx": f[0]["tx_ref"]})
+        fixed.append((asset, old, delta - cost))
+    if fixed:
+        parts = ", ".join(f"{alerts.symbol(a)} ${o:+.2f} -> ${n:+.2f}" for a, o, n in fixed)
+        alerts.ops(f"Corrected {len(fixed)} past exit(s) whose proceeds the wallet read "
+                   f"missed: {parts}. PNL now reflects the chain.")
+    return fixed
+
+
 # Orders come from two threads: the core loop (buys, monitor sells) and the
 # Telegram poller (FLATTEN, and approvals before they moved to the core). With
 # no mutex, FLATTEN could sell a position the monitor was mid-way through
@@ -436,8 +579,15 @@ def execute_buy(ticket, ref_price):
                    "venue, then RESUME.")
         return "sanity_freeze"
     state.set_ticket_status(ticket["ticket_id"], "filled")
+    # What we actually paid per unit against the print we decided on. The
+    # stop is set from the print (the monitor compares against prints); the
+    # gap between the two is the entry half of the friction PNL reports.
+    eff = (spent / qty) if (qty and spent) else None
+    if eff and fill_price and venue != "coinbase":
+        journal.log_event("buy_friction", asset, {
+            "ref": fill_price, "eff": eff, "pct": round(eff / fill_price - 1, 4)})
     journal.log_fill(client_oid=oid, asset_id=asset, side="buy", qty=qty,
-                     price=fill_price, fee_usd=fee, venue=venue or chain, tx_ref=oid)
+                     price=eff or fill_price, fee_usd=fee, venue=venue or chain, tx_ref=oid)
     alerts.bought(asset, spent, fill_price, inv,
                   "I bank 75% once +20% holds; the rest rides. Reviewed every 30 min.")
     return "filled"
@@ -454,6 +604,7 @@ def execute_sell(asset_id, reason, fraction=1.0):
     qty = pos["qty"] * fraction
     price = marketdata.price(asset_id) or 0
     fee = None
+    measured = True
     try:
         if venue == "coinbase":
             product = asset_id.split(":", 1)[1]
@@ -465,25 +616,30 @@ def execute_sell(asset_id, reason, fraction=1.0):
             proceeds = gross - fee
         elif chain == "solana":
             mint = asset_id.split(":", 1)[1]
-            raw, _dec = solana_dex.token_balance(mint)
+            raw, dec = solana_dex.token_balance(mint)
             amt = int(raw * fraction)
             if amt <= 0:
                 return _no_balance(asset_id, pos)
+            qty = amt / (10 ** dec) if dec else qty   # what actually leaves
             before = solana_dex.usdc_balance()
-            sig, _q = solana_dex.swap(mint, solana_dex.USDC_MINT, amt, 600)
+            sig, q = solana_dex.swap(mint, solana_dex.USDC_MINT, amt, 600)
             res = _await_solana(sig)
             if res == "failed":
                 raise RuntimeError("swap failed on-chain")
             if res != "ok":
                 _landed_by_balance(lambda: solana_dex.usdc_balance(), before, sig)
-            proceeds = solana_dex.usdc_balance() - before
+            proceeds, measured = _measure_proceeds(
+                lambda: solana_dex.tx_token_delta(sig, solana_dex.USDC_MINT),
+                solana_dex.usdc_balance, before,
+                int((q or {}).get("outAmount") or 0) / 1e6 or price * qty)
             oid = sig
         elif chain == "base":
             token = asset_id.split(":", 1)[1]
-            raw, _dec = evm_dex.token_balance(token)
+            raw, dec = evm_dex.token_balance(token)
             amt = int(raw * fraction)
             if amt <= 0:
                 return _no_balance(asset_id, pos)
+            qty = amt / (10 ** dec) if dec else qty
             before = evm_dex.usdc_balance()
             oid = evm_dex.swap(token, evm_dex.USDC, amt, 600)
             res = _await_evm(oid)
@@ -491,7 +647,9 @@ def execute_sell(asset_id, reason, fraction=1.0):
                 raise RuntimeError("swap reverted on-chain")
             if res != "confirmed":   # the USDC arriving is the fact, not the receipt
                 _landed_by_balance(lambda: evm_dex.usdc_balance(), before, oid)
-            proceeds = evm_dex.usdc_balance() - before
+            proceeds, measured = _measure_proceeds(
+                lambda: evm_dex.tx_token_delta(oid, evm_dex.USDC),
+                evm_dex.usdc_balance, before, price * qty)
         else:
             return "manual_only"
     except Exception as e:
@@ -502,13 +660,27 @@ def execute_sell(asset_id, reason, fraction=1.0):
 
     if proceeds < 0:
         proceeds = 0.0  # a negative delta means someone else moved the cash
+    if price and qty and venue != "coinbase":
+        # the exit half of the friction: realised per unit vs the print sold on
+        journal.log_event("sell_friction", asset_id, {
+            "mid": price, "eff": proceeds / qty, "pct": round(proceeds / qty / price - 1, 4),
+            "measured": measured})
+    if not measured:
+        alerts.ops(f"{alerts.symbol(asset_id)}: the chain did not report the sale's "
+                   f"proceeds; booked the quote's ${proceeds:.2f}. Check the wallet.")
     cash_venue = venue if venue == "coinbase" else chain
     state.set_cash(cash_venue, state.cash(cash_venue) + proceeds)
     # Book what actually left, not what we asked to leave. A partial fill on a
     # full exit must reduce the position, never delete it -- deleting orphans
     # the unsold tokens, and nothing reconciles positions back from the venue.
     held = pos["qty"] or 0.0
-    sold_share = min(qty / held, 1.0) if held else 1.0
+    if venue == "coinbase":
+        sold_share = min(qty / held, 1.0) if held else 1.0
+    else:
+        # A swap is atomic: the requested share of the wallet balance left,
+        # all of it. Booking by wallet units against booked units would turn
+        # a rounding drift into a phantom residual position.
+        sold_share = min(fraction, 1.0)
     cost_part = pos["cost_basis_usd"] * sold_share
     pnl = proceeds - cost_part
     # Prior partial exits on this life, read BEFORE this exit's own row is
@@ -518,7 +690,8 @@ def execute_sell(asset_id, reason, fraction=1.0):
     # One row per exit with the realised number: the PNL tally reads these.
     journal.log_event("exit_pnl", asset_id, {
         "pnl": round(pnl, 4), "proceeds": round(proceeds, 4), "cost": round(cost_part, 4),
-        "share": round(sold_share, 4), "reason": reason[:60]})
+        "share": round(sold_share, 4), "reason": reason[:60],
+        **({} if measured else {"unmeasured": True})})
     if sold_share >= 0.999:
         # Judge the whole position life, not the closing slice: a ratchet that
         # banked +22% on 75% and a breakeven stop on the rest is a win.
