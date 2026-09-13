@@ -468,6 +468,7 @@ class RugFilter(Base):
     def test_research_never_sees_a_ruggable_candidate(self):
         from tradebot.agent import runner
         from tradebot import signals
+        self.patch(signals, "collect_all", lambda *a, **k: {})
         self.patch(signals, "candidates", lambda *a, **k: [
             {"asset_id": "solana:THIN", "score": 5}, {"asset_id": "solana:DEEP", "score": 4}])
         self.patch(signals, "features", lambda a: {})
