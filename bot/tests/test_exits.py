@@ -165,6 +165,7 @@ class DeferredApproval(Base):
         self.patch(execution.risk, "check_buy", lambda *a, **k: None)
         self.patch(solana_dex, "exit_safety", lambda *a, **k: (True, None, {"roundtrip_loss": 0.02}))
         self.patch(solana_dex, "sol_balance", lambda: 1.0)
+        self.patch(execution.rugcheck, "check", lambda *a, **k: (True, None, {}))
         self.bought = []
         def buy(t, ref):
             self.bought.append(t["asset_id"])
@@ -317,6 +318,7 @@ class EntryTiming(Base):
         self.patch(execution.risk, "check_buy", lambda *a, **k: None)
         self.patch(solana_dex, "exit_safety", lambda *a, **k: (True, None, {"roundtrip_loss": 0.02}))
         self.patch(solana_dex, "sol_balance", lambda: 1.0)
+        self.patch(execution.rugcheck, "check", lambda *a, **k: (True, None, {}))
         self.not_bought = []
         self.patch(execution.alerts, "not_bought", lambda *a: self.not_bought.append(a))
         self.asked = []
@@ -375,6 +377,110 @@ class EntryTiming(Base):
                    lambda *a, **k: (True, None, {"roundtrip_loss": 0.07}))
         self.assertEqual(execution.process_ticket(t, 1000.0, True), "blocked")
         self.assertEqual(self.not_bought[-1][1], "roundtrip_cost")
+
+
+class RugFilter(Base):
+    """A stop is a promise the pool has to keep; these are the conditions
+    under which it can."""
+
+    def setUp(self):
+        super().setUp()
+        from tradebot import rugcheck
+        self.rc = rugcheck
+        self.patch(config, "RUG_MIN_LIQUIDITY_USD", 30000.0)
+        self.patch(config, "RUG_MIN_PAIR_AGE_SEC", 3600)
+        self.patch(config, "RUG_BLOCKED_DEXES", ["pumpfun"])
+        self.patch(config, "RUG_MAX_TOP10_SHARE", 0.40)
+        self.patch(config, "RUG_HOLDER_CHECK", True)
+
+    def _info(self, liq=50000, age_min=120, dex="pumpswap"):
+        return {"liquidity_usd": liq, "created_ms": (time.time() - age_min * 60) * 1000,
+                "dex": dex, "pair_address": "POOL"}
+
+    def test_pair_checks_in_plain_english(self):
+        ok, why, _ = self.rc.check_pair(self._info())
+        self.assertTrue(ok)
+        self.assertEqual(self.rc.check_pair(self._info(liq=8000))[1],
+                         "only $8,000 of liquidity (I want $30,000+)")
+        self.assertEqual(self.rc.check_pair(self._info(age_min=12))[1],
+                         "the pool is only 12 min old (I want 60+)")
+        self.assertEqual(self.rc.check_pair(self._info(dex="pumpfun"))[1],
+                         "still on the pumpfun bonding curve")
+        self.assertEqual(self.rc.check_pair(None)[1], "no pair data")
+
+    def _rpc(self, amounts, owners, supply):
+        def rpc(method, params):
+            if method == "getTokenLargestAccounts":
+                return {"value": [{"address": f"A{i}", "amount": str(a)}
+                                  for i, a in enumerate(amounts)]}
+            if method == "getTokenSupply":
+                return {"value": {"amount": str(supply)}}
+            if method == "getMultipleAccounts":
+                return {"value": [{"data": {"parsed": {"info": {"owner": o}}}} for o in owners]}
+            raise AssertionError(method)
+        self.patch(solana_dex, "_rpc", rpc)
+
+    def test_the_pool_vault_is_not_a_holder(self):
+        # vault 60% (owned by the pool), then wallets 10%, 8%, 7%, ... of 1000
+        self._rpc([600, 100, 80, 70, 50], ["POOL", "w1", "w2", "w3", "w4"], 1000)
+        share, m = self.rc.top_holders_share("MINT", "POOL")
+        self.assertAlmostEqual(share, 0.30)
+        self.assertEqual(m["vaults_excluded"], 1)
+        self.assertFalse(m["pool_assumed"])
+
+    def test_an_unrecognised_largest_account_is_assumed_to_be_the_pool(self):
+        self._rpc([600, 100, 80], ["x", "w1", "w2"], 1000)
+        share, m = self.rc.top_holders_share("MINT", "POOL")
+        self.assertAlmostEqual(share, 0.18)
+        self.assertTrue(m["pool_assumed"])
+
+    def test_concentrated_supply_is_refused_and_a_blind_read_is_not_a_pass(self):
+        self._rpc([500, 450, 30], ["POOL", "dev", "w1"], 1000)
+        ok, why, m = self.rc.check("solana", "MINT", self._info())
+        self.assertFalse(ok)
+        self.assertEqual(why, "the top 10 wallets hold 48% of the supply (I want under 40%)")
+
+        def down(method, params):
+            raise RuntimeError("rpc down")
+        self.patch(solana_dex, "_rpc", down)
+        ok, why, _ = self.rc.check("solana", "MINT", self._info())
+        self.assertFalse(ok)
+        self.assertEqual(why, "I could not read who holds it")
+
+    def test_base_relies_on_the_pair_checks_alone(self):
+        ok, why, _ = self.rc.check("base", "0xabc", self._info())
+        self.assertTrue(ok)
+
+    def test_the_buy_gate_refuses_a_ruggable_token_in_plain_words(self):
+        state.set_kv("symbol:solana:RUGGY", "ruggy")
+        tid = state.add_ticket(asset_id="solana:RUGGY", venue="solana", chain="solana",
+                               action="BUY_NOW", notional_usd=10.0, ts=time.time())
+        t = [x for x in state.tickets("new") if x["ticket_id"] == tid][0]
+        self.patch(execution.marketdata, "price", lambda a: 1.0)
+        self.patch(execution.marketdata, "last_info",
+                   lambda a, max_age=60: dict(self._info(liq=9000), change_m5=0.0))
+        self.assertEqual(execution.process_ticket(t, 1000.0, True), "blocked")
+        self.assertTrue(any("I didn't buy ruggy: only $9,000 of liquidity" in m
+                            for m in self.said))
+        self.assertEqual(journal.query("SELECT status FROM tickets WHERE ticket_id=?",
+                                       (tid,))[0]["status"], "blocked:rug_risk")
+
+    def test_research_never_sees_a_ruggable_candidate(self):
+        from tradebot.agent import runner
+        from tradebot import signals
+        self.patch(signals, "candidates", lambda *a, **k: [
+            {"asset_id": "solana:THIN", "score": 5}, {"asset_id": "solana:DEEP", "score": 4}])
+        self.patch(signals, "features", lambda a: {})
+        self.patch(config, "PAID_PROMO_SOURCES", [])
+        infos = {"THIN": dict(self._info(liq=6000), price=1.0, volume_h24=1, base_symbol="T"),
+                 "DEEP": dict(self._info(), price=1.0, volume_h24=1, base_symbol="D")}
+        self.patch(runner.marketdata, "dexscreener_token", lambda c, a: infos[a])
+        from tradebot import shorts
+        self.patch(shorts, "candidates", lambda *a, **k: [])
+        self.patch(runner.marketdata, "coinbase_movers", lambda: [])
+        self.patch(runner.marketdata, "ohlcv_dex", lambda *a, **k: [])
+        got = [c["address"] for c in runner.gather() if c.get("address")]
+        self.assertEqual(got, ["DEEP"])
 
 
 class PnlLastExits(Base):

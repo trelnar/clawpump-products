@@ -5,7 +5,7 @@ import json
 import threading
 import time
 
-from . import alerts, approval, config, journal, marketdata, ratchet, risk, state
+from . import alerts, approval, config, journal, marketdata, ratchet, risk, rugcheck, state
 from .exchanges import coinbase, evm_dex, solana_dex
 
 
@@ -32,7 +32,16 @@ def _gates_buy(ticket, total_value, marks_fresh):
     if lo and hi and not (lo <= ref <= hi):
         raise risk.Reject("out_of_zone", f"price {ref} not in [{lo},{hi}]")
     # gate 2b: entry timing -- from the same read, no second call
-    _entry_timing(ticket, marketdata.last_info(ticket["asset_id"]))
+    info = marketdata.last_info(ticket["asset_id"])
+    _entry_timing(ticket, info)
+    # gate 2c: rug filter -- can this pool keep the stop's promise at all?
+    chain = ticket.get("chain")
+    if chain in ("solana", "base"):
+        ok, why, measured = rugcheck.check(chain, ticket["asset_id"].split(":", 1)[1], info)
+        journal.log_event("rug_check", ticket["asset_id"],
+                          {"ok": ok, "reason": why, **(measured or {})})
+        if not ok:
+            raise risk.Reject("rug_risk", why)
     # gate 3: risk-limits (includes fat-finger + cash)
     notional = ticket["notional_usd"]
     risk.check_buy(ticket["asset_id"], ticket["venue"], ticket.get("chain"),
@@ -160,7 +169,7 @@ def _run_gates(ticket, total_value, marks_fresh):
             return DEFERRED
         risk.log_reject(asset, rj)
         state.set_ticket_status(ticket["ticket_id"], f"blocked:{rj.rule}")
-        if rj.rule == "waited_out":
+        if rj.rule in ("waited_out", "rug_risk"):
             alerts.ops(f"I didn't buy {alerts.symbol(asset)}: {rj.detail}.")
         else:
             alerts.not_bought(asset, rj.rule, rj.detail)

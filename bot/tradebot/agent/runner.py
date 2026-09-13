@@ -5,7 +5,7 @@ import json
 import re
 import time
 
-from .. import calibration, config, journal, marketdata, ratchet, risk, state
+from .. import calibration, config, journal, marketdata, ratchet, risk, rugcheck, state
 from . import prompts
 
 MAX_CANDIDATES_PER_CYCLE = 6
@@ -58,6 +58,12 @@ def gather():
             seen.add(asset)
             return
         if not info or info["liquidity_usd"] < config.SIGNAL_MIN_LIQUIDITY_USD:
+            return
+        ok, why, _m = rugcheck.check_pair(info)
+        if not ok:
+            # Not worth a model call: the buy gate would refuse it anyway.
+            journal.log_event("candidate_rug_filtered", asset, why)
+            seen.add(asset)
             return
         seen.add(asset)
         row = {"chain": chain, "address": address, "source": source, **{

@@ -213,6 +213,17 @@ ROUNDTRIP_LOSS_MAX = float(env("ROUNDTRIP_LOSS_MAX", "0.05"))
 # rather than blocking it. Percent, as DexScreener reports priceChange.m5.
 ENTRY_M5_MIN_PCT = float(env("ENTRY_M5_MIN_PCT", "5"))    # skip while the 5-min move <= -5%
 ENTRY_M5_MAX_PCT = float(env("ENTRY_M5_MAX_PCT", "30"))   # skip while the 5-min move >= +30%
+# Rug filter (operator: "Build it", 2026-09-13). Three of the first five exits
+# were rugs (-100%, -99%, -71%) on tokens that cleared a $5k liquidity bar; a
+# -15% stop cannot fire through a pulled pool. These are the conditions under
+# which a token is worth a $10 position at all. Applied before research (so no
+# API spend on the ruggable) and again at the buy gate (with the holder read).
+RUG_MIN_LIQUIDITY_USD = float(env("RUG_MIN_LIQUIDITY_USD", "30000"))
+RUG_MIN_PAIR_AGE_SEC = int(env("RUG_MIN_PAIR_AGE_SEC", "3600"))
+RUG_BLOCKED_DEXES = [x.strip().lower() for x in env(
+    "RUG_BLOCKED_DEXES", "pumpfun,moonshot").split(",") if x.strip()]   # bonding curves
+RUG_MAX_TOP10_SHARE = float(env("RUG_MAX_TOP10_SHARE", "0.40"))    # of supply, pool excluded
+RUG_HOLDER_CHECK = env("RUG_HOLDER_CHECK", "1") == "1"             # Solana only (keyless RPC)
 MONITOR_INTERVAL_TOKEN_SEC = 5
 MONITOR_INTERVAL_CEX_SEC = 10
 VALUE_SAMPLE_SEC = 60            # rolling value series sampling
