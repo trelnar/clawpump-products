@@ -486,6 +486,8 @@ def repair_zero_proceeds(days=30):
                               (asset, r["ts"] - 5, r["ts"] + 600))
             tx = f[0]["tx_ref"] if f else None
             if not tx or tx in used:
+                journal.log_event("exit_repair_skipped", asset,
+                                  "no sell fill to read" if not tx else f"tx already booked: {tx}")
                 continue
             used.add(tx)
         try:
@@ -497,6 +499,9 @@ def repair_zero_proceeds(days=30):
             journal.log_event("exit_repair_fail", asset, str(e)[:120])
             continue
         if not delta or delta <= 0:
+            # The chain agrees: nothing came back. That is a real total loss.
+            journal.log_event("exit_repair_skipped", asset,
+                              f"chain reports {delta} USDC from {tx}")
             continue
         cost = float(d.get("cost") or 0)
         old = float(d.get("pnl") or 0)
