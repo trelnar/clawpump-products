@@ -29,6 +29,11 @@ def status_text():
         ok, why = state.whitelist_state(w["asset_id"])
         lines.append(f"  {w['asset_id']}: {why}" + ("" if ok else " [inactive]"))
     lines.append(f"Pending approvals: {pend[0]['c']}")
+    from . import shorts
+    if shorts.enabled():
+        lines.append(f"Shorts: ON ({len(shorts.open_positions())} open on Hyperliquid)")
+    else:
+        lines.append("Shorts: OFF (SHORTS_ENABLED=1 in secrets.env turns them on)")
     return "\n".join(lines)
 
 
