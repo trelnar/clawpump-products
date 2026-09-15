@@ -608,9 +608,58 @@ class SimOutcome(Base):
         txt = calibration.scorecard(1)
         self.assertIn("$ per $10 by stop/target, every token call (n=1-1):", txt)
         self.assertIn("token calls with p30 >= 0.25", txt)
-        row15 = [ln for ln in txt.splitlines() if ln.startswith("  -15% ")][0]
+        row15 = [ln for ln in txt.splitlines() if ln.strip().startswith("-15% ")][0]
         self.assertIn("$+1.10", row15)                          # 15/15
         self.assertIn("$+2.60", row15)                          # 15/30
+
+    def test_a_row_observed_before_the_grid_existed_gets_no_grid(self):
+        fid = journal.log_forecast({"asset_id": "solana:PREGRID", "action": "PASS", "p30": 0.2})
+        calibration.open_tracking(fid, "solana:PREGRID", "PASS", 1.0)
+        with journal._lock:      # the old tracker saw -16% at hour one; no crosses column then
+            journal.conn().execute("UPDATE forecast_tracking SET max_6h=1.0, min_6h=0.84, "
+                                   "samples=2, stop_ts=start_ts+3600, start_ts=start_ts-? "
+                                   "WHERE forecast_id=?", (calibration.config.P30_WINDOW_SEC - 120, fid))
+            journal.conn().commit()
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:PREGRID": 1.05}, True))
+        calibration.tick()
+        self.assertIsNone(journal.query("SELECT crosses FROM forecast_tracking WHERE forecast_id=?",
+                                        (fid,))[0]["crosses"])
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 0)
+        calibration.tick()
+        o = journal.query("SELECT * FROM outcomes WHERE forecast_id=?", (fid,))[0]
+        self.assertEqual(o["sim_result"], "stop")           # the legacy sim still knows
+        self.assertIsNone(o["sim_grid"])                     # the grid does not pretend to
+
+    def test_a_level_added_later_is_not_scored_on_rows_that_never_watched_it(self):
+        self.patch(calibration.config, "SIM_STOPS", [0.10])
+        self.patch(calibration.config, "SIM_TARGETS", [0.15])
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 12 * 3600)
+        fid = journal.log_forecast({"asset_id": "solana:WIDEN", "action": "PASS", "p30": 0.2})
+        calibration.open_tracking(fid, "solana:WIDEN", "PASS", 1.0)
+        with journal._lock:
+            journal.conn().execute("UPDATE forecast_tracking SET start_ts=start_ts-? WHERE forecast_id=?",
+                                   (calibration.config.P30_WINDOW_SEC - 120, fid))
+            journal.conn().commit()
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:WIDEN": 0.75}, True))
+        calibration.tick()                                   # -25% printed under the narrow list
+        self.patch(calibration.config, "SIM_STOPS", [0.10, 0.15, 0.20, 0.25])   # operator widens
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:WIDEN": 1.05}, True))
+        calibration.tick()
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 0)
+        calibration.tick()
+        g = json.loads(journal.query("SELECT sim_grid FROM outcomes WHERE forecast_id=?",
+                                     (fid,))[0]["sim_grid"])
+        self.assertEqual(sorted(g), ["10/15"])               # only the pair it watched
+        self.assertEqual(g["10/15"][0], "stop")
+
+    def test_levels_keep_lossless_labels(self):
+        self.patch(calibration.config, "SIM_STOPS", [0.12, 0.125])
+        self.patch(calibration.config, "SIM_TARGETS", [0.15])
+        o = self._run("solana:HALF", 1.0, [0.878, 1.16])     # -12.2%: past 12, not past 12.5
+        g = json.loads(o["sim_grid"])
+        self.assertEqual(g["12/15"][0], "stop")
+        self.assertEqual(g["12.5/15"][0], "target")
+        self.assertIn("-12.5%", calibration.scorecard(1))
 
     def test_the_perp_grid_is_mirrored_and_kept_apart(self):
         self.patch(calibration.config, "HL_TARGET", 0.08)
@@ -627,6 +676,9 @@ class SimOutcome(Base):
         txt = calibration.scorecard(1)
         self.assertIn("perp calls (short) (n=1-1):", txt)
         self.assertNotIn("every token call", txt)
+        block = txt[txt.index("perp calls (short)"):]
+        self.assertIn("-4%", block.splitlines()[1])          # a short's target: price DOWN
+        self.assertTrue(block.splitlines()[2].strip().startswith("+2%"))   # its stop: price UP
 
     def test_a_short_thesis_is_mirrored(self):
         self.patch(calibration.config, "HL_TARGET", 0.08)
@@ -770,6 +822,14 @@ class SymbolLookup(Base):
         self.assertIsNone(state.get_kv("symbol:solana:FLAKY456"))
         self.assertEqual(alerts.symbol("solana:FLAKY456"), "FLK")      # next time
         self.assertEqual(state.get_kv("symbol:solana:FLAKY456"), "FLK")
+
+
+class MigrationRace(Base):
+    def test_a_column_the_other_process_just_added_is_not_a_crash(self):
+        from tradebot import journal as _j
+        orig = _j.query
+        self.patch(_j, "query", lambda sql, args=(): [] if sql.startswith("PRAGMA") else orig(sql, args))
+        state._migrate()          # every ALTER now hits an existing column
 
 
 class TrackerAsync(Base):

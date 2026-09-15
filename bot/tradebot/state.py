@@ -2,6 +2,7 @@
 halt modes, pending approvals/tickets, and the flow-adjusted rolling 24h value
 series that risk reads for the halt."""
 import json
+import sqlite3
 import time
 
 from . import config, journal
@@ -70,9 +71,16 @@ def _migrate():
                              ("outcomes", "sim_return", "REAL")):
         cols = {r["name"] for r in journal.query(f"PRAGMA table_info({table})")}
         if col not in cols:
-            with journal._lock:
-                journal.conn().execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-                journal.conn().commit()
+            try:
+                with journal._lock:
+                    journal.conn().execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                    journal.conn().commit()
+            except sqlite3.OperationalError as e:
+                # core and agent restart together and both see the column
+                # missing; the second ALTER is the other process's, done.
+                if "duplicate column" not in str(e).lower():
+                    raise
+                continue
             journal.log_event("schema_migrate", detail=f"{table}.{col}")
     # Base ids written before norm_asset existed may carry checksum case. If
     # both spellings of one asset exist, they are one holding: merge, never

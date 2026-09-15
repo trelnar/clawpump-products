@@ -128,27 +128,40 @@ def _levels(asset_id):
     return config.SIM_STOPS, config.SIM_TARGETS
 
 
+def _lab(level):
+    """A lossless percent label: 0.10 -> '10', 0.125 -> '12.5'. Rounding to a
+    whole percent made 0.12 and 0.125 one key, and one cell."""
+    return f"{level * 100:g}"
+
+
 def _lkey(kind, level):
-    return f"{kind}{int(round(level * 100))}"
+    return f"{kind}{_lab(level)}"
 
 
 def _crosses(r, px, now, short):
-    """First print past each grid level, inside the thesis window."""
+    """First print past each grid level, inside the thesis window. The record
+    remembers which levels it watched ('_w'): a level added to the config
+    later was not watched on this row, and must not be scored on it."""
     start = r["start_price"] or 0
     try:
         c = json.loads(r.get("crosses") or "{}")
     except (TypeError, ValueError):
         c = {}
+    stops, targets = _levels(r["asset_id"])
+    if "_w" not in c:
+        c["_w"] = {"s": [_lab(x) for x in stops], "t": [_lab(x) for x in targets]}
     if start <= 0:
         return c
-    stops, targets = _levels(r["asset_id"])
+    watched = c["_w"]
     for lv in stops:
         k = _lkey("s", lv)
-        if k not in c and (px >= start * (1 + lv) if short else px <= start * (1 - lv)):
+        if _lab(lv) in watched["s"] and k not in c and (
+                px >= start * (1 + lv) if short else px <= start * (1 - lv)):
             c[k] = now
     for lv in targets:
         k = _lkey("t", lv)
-        if k not in c and (px <= start * (1 - lv) if short else px >= start * (1 + lv)):
+        if _lab(lv) in watched["t"] and k not in c and (
+                px <= start * (1 - lv) if short else px >= start * (1 + lv)):
             c[k] = now
     return c
 
@@ -183,7 +196,12 @@ def _advance(r, px, now):
                 stop_ts = now
             if hit_target and target_ts is None:
                 target_ts = now
-        crosses = json.dumps(_crosses(r, px, now, short))
+        if crosses is None and r.get("max_6h") is not None:
+            # Observed in-window before the grid existed: its early prints
+            # were never level-checked, so no grid, rather than a wrong one.
+            pass
+        else:
+            crosses = json.dumps(_crosses(r, px, now, short))
     return (max_p, min_p, max6, min6, end6, end_ts, stop_ts, target_ts, crosses, now,
             r["forecast_id"])
 
@@ -237,12 +255,15 @@ def _grid(r):
         return None
     short = (r["asset_id"] or "").startswith("perp:")
     stops, targets = _levels(r["asset_id"])
+    watched = c.get("_w") or {"s": [], "t": []}
     out = {}
     for s_ in stops:
         for t_ in targets:
+            if _lab(s_) not in watched["s"] or _lab(t_) not in watched["t"]:
+                continue        # this row never watched that level
             res, ret = _play(r, s_, t_, c.get(_lkey("s", s_)), c.get(_lkey("t", t_)), short)
             if res is not None:
-                out[f"{int(round(s_ * 100))}/{int(round(t_ * 100))}"] = [res, round(ret, 4)]
+                out[f"{_lab(s_)}/{_lab(t_)}"] = [res, round(ret, 4)]
     return out
 
 
@@ -389,23 +410,26 @@ def grid_lines(since):
     good = [r for r in tokens if (r["p30"] or 0) >= config.SIM_GRID_P30_MIN]
     perps = [r for r in rows if (r["a"] or "").startswith("perp:")]
     out = []
-    for title, sel, stops, targets in (
-            ("every token call", tokens, config.SIM_STOPS, config.SIM_TARGETS),
+    for title, sel, stops, targets, ssign, tsign in (
+            ("every token call", tokens, config.SIM_STOPS, config.SIM_TARGETS, "-", "+"),
             (f"token calls with p30 >= {config.SIM_GRID_P30_MIN:.2f}", good,
-             config.SIM_STOPS, config.SIM_TARGETS),
-            ("perp calls (short)", perps, config.SIM_STOPS_PERP, config.SIM_TARGETS_PERP)):
+             config.SIM_STOPS, config.SIM_TARGETS, "-", "+"),
+            # a short's stop is the price UP, its target the price DOWN
+            ("perp calls (short)", perps, config.SIM_STOPS_PERP, config.SIM_TARGETS_PERP,
+             "+", "-")):
         if not sel:
             continue
         cells = _grid_cells(sel)
-        if not cells:
+        wanted = [f"{_lab(s_)}/{_lab(t_)}" for s_ in stops for t_ in targets]
+        ns = [cells[k][1] for k in wanted if k in cells]
+        if not ns:
             continue
-        ns = [n for _m, n in cells.values()]
         out.append(f"$ per $10 by stop/target, {title} (n={min(ns)}-{max(ns)}):")
-        out.append("  stop  " + "".join(f"{'+' + str(int(round(t * 100))) + '%':>8s}" for t in targets))
+        out.append("  stop  " + "".join(f"{tsign + _lab(t_) + '%':>8s}" for t_ in targets))
         for s_ in stops:
-            line = f"  -{int(round(s_ * 100)):>2d}% "
+            line = f"{ssign + _lab(s_) + '%':>7s} "
             for t_ in targets:
-                m = cells.get(f"{int(round(s_ * 100))}/{int(round(t_ * 100))}")
+                m = cells.get(f"{_lab(s_)}/{_lab(t_)}")
                 line += f"{('$%+.2f' % (10 * m[0])) if m else '    -':>8s}"
             out.append(line)
     return out
