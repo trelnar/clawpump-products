@@ -542,6 +542,13 @@ class SimOutcome(Base):
         self.assertIn("stopped 100%", txt)
         self.assertIn("$-1.90 each after costs", txt)
 
+    def test_the_scorecard_buckets_the_sim_by_stated_p30(self):
+        self.patch(calibration.config, "BUY_P30_MIN", 0.35)
+        self._run("solana:B1", 1.0, [1.31])                    # p30 0.5 in _run
+        txt = calibration.scorecard(1)
+        self.assertIn("By the p30 the model stated (buy bar is 0.35):", txt)
+        self.assertIn("p30~0.5 n=1: won 100%, stopped 0% -> $+2.60 per $10", txt)
+
     def test_the_target_printing_first_is_a_win(self):
         o = self._run("solana:SIM2", 1.0, [1.31, 0.8])
         self.assertEqual(o["sim_result"], "target")

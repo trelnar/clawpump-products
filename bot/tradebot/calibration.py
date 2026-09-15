@@ -273,6 +273,25 @@ def scorecard(days=30):
             out.append(f"  as $10 trades ({ns}): won {100*won/ns:.0f}%, stopped "
                        f"{100*stopped/ns:.0f}%, flat {100*(ns-won-stopped)/ns:.0f}% -> "
                        f"${per10:+.2f} each after costs")
+    # Where should the buy bar sit? The same sim, bucketed by the p30 the
+    # model stated, tokens only. The bucket where the money turns positive
+    # is the answer; BUY_P30_MIN is a guess until this says otherwise.
+    buckets = journal.query(
+        "SELECT ROUND(f.p30, 1) b, COUNT(*) n, "
+        "SUM(CASE WHEN o.sim_result='target' THEN 1 ELSE 0 END) won, "
+        "SUM(CASE WHEN o.sim_result='stop' THEN 1 ELSE 0 END) stopped, "
+        "AVG(o.sim_return) sim_ret "
+        "FROM outcomes o JOIN forecasts f ON f.forecast_id=o.forecast_id "
+        "JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
+        "WHERE o.ts > ? AND o.sim_result IS NOT NULL AND f.p30 IS NOT NULL "
+        "AND t.asset_id NOT LIKE 'perp:%' GROUP BY b ORDER BY b", (since,))
+    if buckets:
+        out.append(f"By the p30 the model stated (buy bar is {config.BUY_P30_MIN:.2f}):")
+        for b in buckets:
+            n = b["n"] or 1
+            out.append(f"  p30~{b['b']:.1f} n={b['n']}: won {100*(b['won'] or 0)/n:.0f}%, "
+                       f"stopped {100*(b['stopped'] or 0)/n:.0f}% -> "
+                       f"${10*(b['sim_ret'] or 0):+.2f} per $10")
     return "\n".join(out)
 
 
