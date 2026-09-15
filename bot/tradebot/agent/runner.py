@@ -197,7 +197,7 @@ def research(candidates):
                    "what make the difference visible.\n\n"
                    "`your_recent_calibration` is YOUR OWN record over the last two weeks, "
                    "per action: the mean p30 you stated against the share that actually "
-                   "reached +30% within 6h (and p2x against 2x within 72h; peaks sampled "
+                   "reached +30% within 6h (and p2x against 2x within 12h; peaks sampled "
                    "every 5 min). `target_before_stop_share` is the share whose +30% "
                    "printed BEFORE a -15% did -- the trade as the core would have run it "
                    "-- and `sim_pnl_per_10usd` is what a $10 position on each call "

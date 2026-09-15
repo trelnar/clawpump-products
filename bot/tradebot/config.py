@@ -240,7 +240,10 @@ TELEGRAM_STALE_SEC = 300         # no successful poll for this long -> SELL_ONLY
 TELEGRAM_WATCHDOG_SEC = 30       # how often the core checks the poller
 AGENT_STALE_SEC = 4500           # no completed research cycle -> alert (2.5 cycles at 30 min)
 AGENT_WATCHDOG_SEC = 300
-TRACK_WINDOW_SEC = 72 * 3600     # forecast resolution horizon (1-3 day thesis)
+# Forecast resolution horizon. 72h under the 2x thesis; the thesis is now 6h,
+# and SCORE waiting three days for its first row meant three days of flying
+# blind after every change. 12h keeps a full window plus slack.
+TRACK_WINDOW_SEC = int(env("TRACK_WINDOW_SEC", str(12 * 3600)))
 TRACK_BATCH = 150                # distinct ASSETS marked per pass, youngest forecasts first
 TRACK_INTERVAL_SEC = 300         # tracker runs off the main loop (2026-09-13); 5-min samples
 SIM_FRICTION = float(env("SIM_FRICTION", "0.04"))   # round-trip cost assumed by SCORE's sim P&L
