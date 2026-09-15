@@ -421,18 +421,20 @@ class RugFilter(Base):
         self.patch(solana_dex, "_rpc", rpc)
 
     def test_the_pool_vault_is_not_a_holder(self):
-        # vault 60% (owned by the pool), then wallets 10%, 8%, 7%, ... of 1000
+        # vault 60% (owned by the pool), then wallets 10%, 8%, 7%, 5% of 1000
         self._rpc([600, 100, 80, 70, 50], ["POOL", "w1", "w2", "w3", "w4"], 1000)
         share, m = self.rc.top_holders_share("MINT", "POOL")
         self.assertAlmostEqual(share, 0.30)
-        self.assertEqual(m["vaults_excluded"], 1)
-        self.assertFalse(m["pool_assumed"])
+        self.assertFalse(m["census"])
+        self.assertAlmostEqual(m["coverage"], 0.75)     # 300 of the 400 non-pool units seen
 
-    def test_an_unrecognised_largest_account_is_assumed_to_be_the_pool(self):
+    def test_an_unrecognised_pool_is_a_refusal_not_a_guess(self):
         self._rpc([600, 100, 80], ["x", "w1", "w2"], 1000)
-        share, m = self.rc.top_holders_share("MINT", "POOL")
-        self.assertAlmostEqual(share, 0.18)
-        self.assertTrue(m["pool_assumed"])
+        with self.assertRaises(self.rc.Unbounded):
+            self.rc.top_holders_share("MINT", "POOL")
+        ok, why, _ = self.rc.check("solana", "MINT", self._info())
+        self.assertFalse(ok)
+        self.assertEqual(why, "could not tell the pool's own account from the holders")
 
     def test_concentrated_supply_is_refused_and_a_blind_read_is_not_a_pass(self):
         self._rpc([500, 450, 30], ["POOL", "dev", "w1"], 1000)

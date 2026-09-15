@@ -292,6 +292,31 @@ def run_approved_tickets(value, fresh):
                        "requalifies.")
 
 
+def run_new_tickets(value, fresh):
+    """Pick up the agent layer's new tickets: buys through the gates, sells
+    straight to the venue."""
+    for t in state.tickets("new"):
+        if t["action"] in ("BUY_NOW", "ADD"):
+            # An ADD targets a held (therefore already approved) asset, so
+            # gate 5 passes on the whitelist; the risk limits still see the
+            # combined position.
+            from . import ratchet as _ratchet
+            if (t["action"] == "ADD" and _ratchet.mode() == "live"
+                    and _ratchet.is_armed(t["asset_id"])):
+                # an add would move the entry the floor is built on
+                state.set_ticket_status(t["ticket_id"], "blocked:ratchet_armed")
+                journal.log_event("ticket_ratchet_armed", t["asset_id"])
+                state.del_kv(execution._defer_key(t))
+                continue
+            execution.process_ticket(t, value, fresh)
+        elif t["action"] == "SELL_NOW":
+            frac = execution.clamp_fraction(t.get("sell_fraction"))
+            res = execution.execute_sell(t["asset_id"], "agent SELL NOW", frac)
+            # A failed exit is not done. It stays visible as failed; the stop
+            # is still armed and the model re-asks next cycle.
+            state.set_ticket_status(t["ticket_id"], "done" if res != "failed" else "failed")
+
+
 TG_HALT_SOURCE = "telegram_down"
 
 
@@ -462,8 +487,14 @@ def main():
                 except Exception as e:
                     journal.log_event("shorts_monitor_error", detail=repr(e)[:200])
                 last["shorts"] = now
-                run_new_shorts()
+                # The exchange first, then the tickets: a ticket that was
+                # mid-send at the last shutdown must not be sent again.
                 _shorts.reconcile(now)
+                try:
+                    _shorts.resolve_submitting()
+                except Exception as e:
+                    journal.log_event("shorts_resolve_error", detail=repr(e)[:200])
+                run_new_shorts()
             if now - last["agentwatch"] >= config.AGENT_WATCHDOG_SEC:
                 supervise_agent()
                 supervise_auto()
@@ -479,25 +510,7 @@ def main():
                 value, fresh = monitor.portfolio_tick()
                 last["value"] = now
                 run_approved_tickets(value, fresh)
-                # pick up new tickets from the agent layer
-                for t in state.tickets("new"):
-                    if t["action"] in ("BUY_NOW", "ADD"):
-                        # An ADD targets a held (therefore already approved)
-                        # asset, so gate 5 passes on the whitelist; the risk
-                        # limits still see the combined position.
-                        from . import ratchet as _ratchet
-                        if (t["action"] == "ADD" and _ratchet.mode() == "live"
-                                and _ratchet.is_armed(t["asset_id"])):
-                            # an add would move the entry the floor is built on
-                            state.set_ticket_status(t["ticket_id"], "blocked:ratchet_armed")
-                            journal.log_event("ticket_ratchet_armed", t["asset_id"])
-                            state.del_kv(execution._defer_key(t))
-                            continue
-                        execution.process_ticket(t, value, fresh)
-                    elif t["action"] == "SELL_NOW":
-                        frac = execution.clamp_fraction(t.get("sell_fraction"))
-                        execution.execute_sell(t["asset_id"], "agent SELL NOW", frac)
-                        state.set_ticket_status(t["ticket_id"], "done")
+                run_new_tickets(value, fresh)
         except Exception as e:
             journal.log_event("core_loop_error", detail=repr(e))
             if due_hb:

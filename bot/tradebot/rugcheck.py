@@ -34,7 +34,7 @@ def check_pair(info, now=None):
         return False, "no pair data", {}
     liq = float(info.get("liquidity_usd") or 0)
     created = info.get("created_ms")
-    age = (now - created / 1000.0) if created else None
+    age = (now - created / 1000.0) if created is not None else None
     dex = (info.get("dex") or "").lower()
     m = {"liquidity_usd": round(liq), "age_min": None if age is None else int(age / 60),
          "dex": dex}
@@ -43,56 +43,92 @@ def check_pair(info, now=None):
     if liq < config.RUG_MIN_LIQUIDITY_USD:
         return False, (f"only ${liq:,.0f} of liquidity "
                        f"(I want ${config.RUG_MIN_LIQUIDITY_USD:,.0f}+)"), m
-    if age is not None and age < config.RUG_MIN_PAIR_AGE_SEC:
+    if age is None:
+        return False, "I can't tell how old the pool is", m
+    if age < config.RUG_MIN_PAIR_AGE_SEC:
         return False, (f"the pool is only {int(age / 60)} min old "
                        f"(I want {config.RUG_MIN_PAIR_AGE_SEC // 60}+)"), m
     return True, None, m
 
 
+class Unbounded(RuntimeError):
+    """The holder share cannot be bounded from what could be read."""
+
+
+def _census(mint):
+    """Every token account of the mint, (owner, amount), via getProgramAccounts.
+    Exhaustive when the RPC allows it; None when it does not."""
+    from .exchanges import solana_dex
+    try:
+        res = solana_dex._rpc("getProgramAccounts", [
+            solana_dex.TOKEN_PROGRAM,
+            {"encoding": "jsonParsed", "commitment": "confirmed",
+             "filters": [{"dataSize": 165}, {"memcmp": {"offset": 0, "bytes": mint}}]}])
+    except Exception as e:
+        journal.log_event("rug_census_unavailable", f"solana:{mint}", str(e)[:120])
+        return None
+    out = []
+    for acc in res or []:
+        try:
+            info = acc["account"]["data"]["parsed"]["info"]
+            out.append((info["owner"], int(info["tokenAmount"]["amount"])))
+        except (TypeError, KeyError, ValueError):
+            continue
+    return out or None
+
+
 def top_holders_share(mint, pair_address=None, top=10):
     """Share of supply in the largest `top` wallets, AMM vaults excluded.
 
-    Returns (share, measured). Keyless Solana RPC: the 20 largest token
-    accounts, their owners, and the supply. When no vault can be identified
-    the single largest account is assumed to be the pool -- on every
-    graduated token that is what it is -- and the assumption is recorded."""
+    Sound when a full census is available. Otherwise only the 20 largest
+    token accounts are visible: the pool must be positively identified
+    (no guessing which account is the vault), every owner must be readable,
+    and the visible accounts must cover RUG_MIN_HOLDER_COVERAGE of the
+    non-pool supply -- else raises Unbounded, which the gate treats as a
+    refusal. A lower bound is never reported as a safe upper bound."""
     from .exchanges import solana_dex
-    largest = solana_dex._rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
-    accts = [(a["address"], int(a.get("amount") or 0)) for a in (largest.get("value") or [])]
     supply = solana_dex._rpc("getTokenSupply", [mint, {"commitment": "confirmed"}])
     total = int((supply.get("value") or {}).get("amount") or 0)
-    if total <= 0 or not accts:
-        raise RuntimeError("supply or holders unreadable")
-    owners = {}
-    if accts:
-        res = solana_dex._rpc("getMultipleAccounts",
-                              [[a for a, _ in accts],
-                               {"encoding": "jsonParsed", "commitment": "confirmed"}])
-        for (addr, _amt), acc in zip(accts, res.get("value") or []):
-            try:
-                owners[addr] = acc["data"]["parsed"]["info"]["owner"]
-            except (TypeError, KeyError):
-                owners[addr] = None
+    if total <= 0:
+        raise RuntimeError("supply unreadable")
     vaults = set(AMM_AUTHORITIES)
     if pair_address:
         vaults.add(pair_address)
-    held = [(a, amt) for a, amt in accts if owners.get(a) not in vaults]
-    assumed = False
-    if len(held) == len(accts) and held:
-        held = held[1:]                # no vault found: the largest is the pool
-        assumed = True
+    census = _census(mint)
+    if census is not None:
+        rows, full = census, True
+    else:
+        largest = solana_dex._rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
+        accts = [(a["address"], int(a.get("amount") or 0)) for a in (largest.get("value") or [])]
+        if not accts:
+            raise RuntimeError("holders unreadable")
+        res = solana_dex._rpc("getMultipleAccounts",
+                              [[a for a, _ in accts],
+                               {"encoding": "jsonParsed", "commitment": "confirmed"}])
+        rows, full = [], False
+        for (addr, amt), acc in zip(accts, res.get("value") or []):
+            try:
+                rows.append((acc["data"]["parsed"]["info"]["owner"], amt))
+            except (TypeError, KeyError):
+                raise Unbounded("could not read who owns one of the largest accounts")
+    vault_amt = sum(amt for o, amt in rows if o in vaults)
+    if vault_amt <= 0:
+        raise Unbounded("could not tell the pool's own account from the holders")
+    held = [(o, amt) for o, amt in rows if o not in vaults]
+    non_pool = total - vault_amt
+    coverage = (sum(amt for _o, amt in held) / non_pool) if non_pool > 0 else 1.0
+    if not full and coverage < config.RUG_MIN_HOLDER_COVERAGE:
+        raise Unbounded(f"I could only see {coverage:.0%} of the holders")
     # A wallet, not a token account: one deployer spread over nineteen
     # accounts is one holder. Sum by owner before ranking.
     by_owner = {}
-    for a, amt in held:
-        key = owners.get(a) or a
-        by_owner[key] = by_owner.get(key, 0) + amt
+    for o, amt in held:
+        by_owner[o] = by_owner.get(o, 0) + amt
     ranked = sorted(by_owner.values(), reverse=True)
     share = sum(ranked[:top]) / total
-    return share, {"top10_share": round(share, 3), "accounts_read": len(accts),
-                   "wallets": len(by_owner),
-                   "vaults_excluded": len(accts) - len(held) - (1 if assumed else 0),
-                   "pool_assumed": assumed}
+    return share, {"top10_share": round(share, 3), "accounts_read": len(rows),
+                   "wallets": len(by_owner), "census": full,
+                   "coverage": round(coverage, 3)}
 
 
 def check(chain, address, info, now=None):
@@ -108,6 +144,9 @@ def check(chain, address, info, now=None):
             if share > config.RUG_MAX_TOP10_SHARE:
                 return False, (f"the top 10 wallets hold {share:.0%} of the supply "
                                f"(I want under {config.RUG_MAX_TOP10_SHARE:.0%})"), m
+        except Unbounded as e:
+            journal.log_event("rug_holders_unbounded", f"{chain}:{address}", str(e)[:120])
+            return False, str(e), m
         except Exception as e:
             # A blind read is not a pass: the asset is not known to be safe.
             journal.log_event("rug_holders_unreadable", f"{chain}:{address}", str(e)[:120])

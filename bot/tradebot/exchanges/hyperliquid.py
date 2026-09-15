@@ -28,7 +28,10 @@ def info():
     global _info
     if _info is None:
         Info, _, constants = _sdk()
-        _info = Info(constants.MAINNET_API_URL, skip_ws=True)
+        try:      # a stalled read here blocked every monitor pass; bound it
+            _info = Info(constants.MAINNET_API_URL, skip_ws=True, timeout=config.HL_HTTP_TIMEOUT)
+        except TypeError:                          # an SDK without the kwarg
+            _info = Info(constants.MAINNET_API_URL, skip_ws=True)
     return _info
 
 
@@ -39,7 +42,10 @@ def exchange():
         from eth_account import Account
         with open(config.EVM_KEYFILE) as f:
             acct = Account.from_key(f.read().strip())
-        _ex = Exchange(acct, constants.MAINNET_API_URL)
+        try:
+            _ex = Exchange(acct, constants.MAINNET_API_URL, timeout=config.HL_HTTP_TIMEOUT)
+        except TypeError:
+            _ex = Exchange(acct, constants.MAINNET_API_URL)
     return _ex
 
 

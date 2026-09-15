@@ -200,6 +200,13 @@ def execute(ticket, approved=False):
         if approved:
             alerts.ops(f"{alerts.symbol(asset)} short approved but not opened: {why}.")
         return "blocked"
+    if state.get_mode() != "NORMAL":        # last look after the account read
+        state.set_ticket_status(ticket["ticket_id"], "blocked:halt")
+        return "blocked"
+    # Durable before the send: a crash between the fill and the book write
+    # used to leave a 'new' ticket that the restart replayed into a second
+    # short. resolve_submitting() settles these against the exchange.
+    state.set_ticket_status(ticket["ticket_id"], "submitting")
     try:
         sz, px, oid = hl.open_short(coin, ticket["notional_usd"])
     except Exception as e:
@@ -365,9 +372,9 @@ def _tick_ratchet(r, rs, price, now):
 
 
 def monitor(now=None):
-    """One pass: stop, mirrored ratchet, max-hold. Called from the core loop."""
-    if not enabled():
-        return
+    """One pass: stop, mirrored ratchet, max-hold. Called from the core loop.
+    Runs whether or not shorts are enabled: the flag gates new entries, and a
+    short opened before it was turned off still has a stop to honour."""
     rows = open_positions()
     if not rows:
         return
@@ -447,10 +454,35 @@ def _adopt_orphan(coin, why):
 _last_recon = [0.0]
 
 
+def resolve_submitting():
+    """Tickets that were mid-send when the process died: the exchange says
+    whether the short exists. Adopt it (filled) or close the ticket (failed);
+    never replay it."""
+    rows = state.tickets("submitting")
+    if not rows:
+        return
+    try:
+        live = hl.positions()
+    except Exception as e:
+        journal.log_event("hl_positions_fail", detail=str(e)[:120])
+        return
+    for t in rows:
+        coin = coin_of(t["asset_id"])
+        p = live.get(coin)
+        if p and p["size"] < 0:
+            _adopt_orphan(coin, "restart mid-send")
+            state.set_ticket_status(t["ticket_id"], "filled")
+        else:
+            state.set_ticket_status(t["ticket_id"], "failed")
+            journal.log_event("short_submit_lost", t["asset_id"], "no position after restart")
+
+
 def reconcile(now=None):
     """Both directions, every RECON_POSITIONS_SEC: exchange shorts with no
-    row get adopted; rows with no exchange position get dropped."""
-    if not enabled():
+    row get adopted; rows with no exchange position get dropped; a row whose
+    size disagrees with the exchange takes the exchange's number. Runs with
+    shorts disabled too, as long as there is a book to check."""
+    if not enabled() and not open_positions():
         return
     now = now or time.time()
     if now - _last_recon[0] < config.RECON_POSITIONS_SEC:
@@ -470,6 +502,14 @@ def reconcile(now=None):
             journal.log_event("short_gone", r["asset_id"], {"book_qty": r["qty"]})
             _delete(r["asset_id"])
             alerts.ops(f"My {r['coin']} short is no longer on Hyperliquid; dropped it from the book.")
+            continue
+        venue_qty = abs(p["size"])
+        if r["qty"] and abs(venue_qty - r["qty"]) / r["qty"] > config.POSITION_DRIFT_PCT:
+            journal.log_event("short_size_drift", r["asset_id"],
+                              {"book": r["qty"], "exchange": venue_qty})
+            _write({**dict(r), "qty": venue_qty, "notional_usd": venue_qty * r["entry_price"]})
+            alerts.ops(f"My {r['coin']} short is {venue_qty:.6g} on Hyperliquid, not the "
+                       f"{r['qty']:.6g} in my book; the book now says {venue_qty:.6g}.")
 
 
 def summary_lines(marks_):

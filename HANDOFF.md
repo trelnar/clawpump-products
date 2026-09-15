@@ -103,6 +103,21 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   token call, token calls with p30 ≥ `SIM_GRID_P30_MIN`, and perp calls. A positive cell is
   a setting worth trading; no positive cell means the thesis is wrong for these tokens at
   any setting. Same caveat as the rest of the sim: stops are assumed to fill.
+- **Second external validation, 2026-09-15** (fifteen findings, all fixed,
+  `tests/test_validation2.py`): a Solana buy is remembered by its signature from the moment
+  it is broadcast; a landed fill is booked exactly once, on top of an existing position if
+  there is one; an unresolved buy blocks another buy of that asset and counts as exposure;
+  a Coinbase cancel is followed by a read of the final fill; every venue send is preceded by
+  a last look at the halt mode (spot and shorts); the Solana holder check uses a full census
+  when the RPC allows `getProgramAccounts` and otherwise refuses on an unreadable owner, an
+  unidentified pool or thin coverage; an unknown pool age is a refusal; the short monitor
+  and reconciliation run with shorts disabled; the Hyperliquid SDK gets a timeout; a short
+  ticket is `submitting` before the send and settled against the exchange after a restart,
+  and reconciliation adopts the exchange's size; a shadow ratchet sale no longer disarms the
+  live ratchet; a failed SELL_NOW ticket is not "done"; cash reconciliation holds the order
+  lock; an unwatched window is no evidence of a miss; a grid level removed and restored keeps
+  being watched. Remaining known limits: SCORE's stop is idealised, and holder coverage on
+  RPCs without a census is a documented heuristic with refusals, not a proof.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).

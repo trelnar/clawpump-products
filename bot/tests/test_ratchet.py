@@ -149,7 +149,8 @@ class Triggers(Base):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["trigger"], "take")
         self.assertAlmostEqual(rows[0]["fraction"], 0.75)
-        self.assertTrue(self.st()["done"])
+        self.assertTrue(self.st().get("shadow_done"))   # the shadow is quiet...
+        self.assertFalse(self.st()["done"])             # ...but nothing was sold
         self.assertEqual(self.sold, [])                 # shadow: no order
 
     def test_floor_breach_needs_two_fresh_ticks(self):
@@ -348,3 +349,25 @@ class PartialFill(Base):
         p = state.get_position(p["asset_id"])
         self.assertEqual(ratchet.on_tick(p, below, T0 + 71 * 60), "floor")   # the rest goes
         self.assertEqual(len(self.sold), 2)
+
+
+class ShadowThenLive(Base):
+    """A shadow sale must not disarm the real ratchet once LIVE (validation 2, #10)."""
+
+    def test_switching_live_after_a_shadow_sale_still_sells(self):
+        from tradebot import core
+        p = self.position()
+        path = [(0, 100, 8, 3), (60, 130, 12, 4), (61, 131, 12, 4), (62, 130, 12, 4), (63, 131, 12, 4)]
+        self.drive(p, path, until_minute=66)
+        p = state.get_position(p["asset_id"])
+        below = {"price": 100.5, "fresh": True, "ts": 0, "buys_m5": 5, "sells_m5": 5}
+        ratchet.on_tick(p, below, T0 + 70 * 60)
+        self.assertEqual(ratchet.on_tick(p, below, T0 + 70 * 60 + 30), "floor")   # shadow
+        self.assertEqual(self.sold, [])
+        st = ratchet.load(p["asset_id"])
+        self.assertTrue(st.get("shadow_done"))
+        self.assertFalse(st["done"])
+        core.ratchet_text("LIVE")
+        self.addCleanup(core.ratchet_text, "SHADOW")
+        self.assertEqual(ratchet.on_tick(p, below, T0 + 71 * 60), "floor")        # real
+        self.assertEqual(len(self.sold), 1)

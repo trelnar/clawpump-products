@@ -152,16 +152,15 @@ def _crosses(r, px, now, short):
         c["_w"] = {"s": [_lab(x) for x in stops], "t": [_lab(x) for x in targets]}
     if start <= 0:
         return c
-    watched = c["_w"]
-    for lv in stops:
-        k = _lkey("s", lv)
-        if _lab(lv) in watched["s"] and k not in c and (
-                px >= start * (1 + lv) if short else px <= start * (1 - lv)):
+    # The row's own levels, whatever the config says today: a level removed
+    # and later restored would otherwise have a gap nobody could see.
+    for lab in c["_w"]["s"]:
+        lv, k = float(lab) / 100, f"s{lab}"
+        if k not in c and (px >= start * (1 + lv) if short else px <= start * (1 - lv)):
             c[k] = now
-    for lv in targets:
-        k = _lkey("t", lv)
-        if _lab(lv) in watched["t"] and k not in c and (
-                px <= start * (1 - lv) if short else px >= start * (1 + lv)):
+    for lab in c["_w"]["t"]:
+        lv, k = float(lab) / 100, f"t{lab}"
+        if k not in c and (px <= start * (1 - lv) if short else px >= start * (1 + lv)):
             c[k] = now
     return c
 
@@ -221,6 +220,15 @@ def _sim(r):
     return _play(r, stop, target, st, tt, short)
 
 
+def _window_watched(r):
+    """Was the end of the thesis window observed? A print at +5 min and
+    silence until resolution says nothing about the other 5h55m."""
+    end_ts, start_ts = r.get("end_ts"), r.get("start_ts") or 0
+    if end_ts is None:
+        return False
+    return end_ts >= start_ts + config.P30_WINDOW_SEC - 3 * config.TRACK_INTERVAL_SEC
+
+
 def _play(r, stop, target, st, tt, short):
     """One trade at one (stop, target) pair given the first prints past each.
     Returns (result, net return) or (None, None) when the end of the window
@@ -236,9 +244,7 @@ def _play(r, stop, target, st, tt, short):
         # 'Flat' is only a result if the end of the window was actually
         # watched. One print at +5 min and silence until resolution is not
         # a +16% trade; it is a gap in coverage.
-        end_ts, start_ts = r.get("end_ts"), r.get("start_ts") or 0
-        deadline = start_ts + config.P30_WINDOW_SEC
-        if end_ts is not None and end_ts < deadline - 3 * config.TRACK_INTERVAL_SEC:
+        if not _window_watched(r):
             return None, None
         ret = end / start - 1
         return "flat", (-ret if short else ret) - fee
@@ -292,6 +298,8 @@ def _resolve(forecast_id):
         hit30 = int(bool(low6 and start > 0 and low6 / start <= 1 - config.HL_TARGET))
     else:
         hit30 = int(bool(m6 and m6 >= 1 + config.P30_TARGET))
+    if not hit30 and not _window_watched(r):
+        hit30 = None       # not seen to miss: an unwatched window is no evidence
     sim_result, sim_ret = _sim(r)
     grid = _grid(r)
     journal.log_outcome(forecast_id=forecast_id, max_multiple=mult,
@@ -350,7 +358,8 @@ def scorecard(days=30):
     since = time.time() - days * 86400
     rows = journal.query(
         f"SELECT {_GROUP} a, COUNT(*) n, AVG(o.max_multiple) avg_mult, "
-        "SUM(o.hit_30) h30, SUM(o.hit_2x) h2, SUM(o.hit_3x) h3, SUM(o.hit_5x) h5, "
+        "SUM(o.hit_30) h30, SUM(o.hit_30 IS NOT NULL) n30, "
+        "SUM(o.hit_2x) h2, SUM(o.hit_3x) h3, SUM(o.hit_5x) h5, "
         "SUM(CASE WHEN o.sim_result='target' THEN 1 ELSE 0 END) won, "
         "SUM(CASE WHEN o.sim_result='stop' THEN 1 ELSE 0 END) stopped, "
         "SUM(CASE WHEN o.sim_result IS NOT NULL THEN 1 ELSE 0 END) n_sim, "
@@ -366,7 +375,8 @@ def scorecard(days=30):
         n = r["n"] or 1
         perp = (r["a"] or "").endswith("/perp")
         tgt = f"-{config.HL_TARGET:.0%}" if perp else f"+{config.P30_TARGET:.0%}"
-        out.append(f"{r['a'] or '?'} n={r['n']}: {tgt}/6h {100*(r['h30'] or 0)/n:.0f}%, "
+        n30 = r["n30"] or n
+        out.append(f"{r['a'] or '?'} n={r['n']}: {tgt}/6h {100*(r['h30'] or 0)/n30:.0f}%, "
                    f"peak {r['avg_mult'] or 0:.2f}x, 2x {100*(r['h2'] or 0)/n:.0f}%")
         ns = r["n_sim"] or 0
         if ns:
@@ -467,7 +477,7 @@ def feedback(days=14):
     since = time.time() - days * 86400
     rows = journal.query(
         f"SELECT {_GROUP} a, COUNT(*) n, AVG(f.p2x) stated, AVG(o.hit_2x) hit2, "
-        "AVG(f.p30) stated30, AVG(o.hit_30) hit30, "
+        "AVG(f.p30) stated30, AVG(o.hit_30) hit30, SUM(o.hit_30 IS NOT NULL) n30, "
         "AVG(o.hit_3x) hit3, AVG(o.max_multiple) peak, "
         "AVG(CASE WHEN o.sim_result='target' THEN 1.0 WHEN o.sim_result IS NULL THEN NULL "
         "ELSE 0.0 END) won, "
@@ -483,12 +493,15 @@ def feedback(days=14):
         d = {
             "resolved": r["n"],
             "stated_p30_mean": round(r["stated30"] or 0, 3),
-            "reached_30pct_in_6h_share": round(r["hit30"] or 0, 3),
             "stated_p2x_mean": round(r["stated"] or 0, 3),
             "reached_2x_share": round(r["hit2"] or 0, 3),
             "reached_3x_share": round(r["hit3"] or 0, 3),
             "peak_multiple_mean": round(r["peak"] or 0, 2),
         }
+        if r["n30"]:
+            # only windows that were actually watched can say the target was missed
+            d["judged_for_30pct"] = r["n30"]
+            d["reached_30pct_in_6h_share"] = round(r["hit30"] or 0, 3)
         if r["sim_ret"] is not None:
             # the thesis as a trade: target banked before the stop printed?
             d["target_before_stop_share"] = round(r["won"] or 0, 3)

@@ -31,6 +31,9 @@ def _gates_buy(ticket, total_value, marks_fresh):
     lo, hi = ticket.get("buy_zone_lo"), ticket.get("buy_zone_hi")
     if lo and hi and not (lo <= ref <= hi):
         raise risk.Reject("out_of_zone", f"price {ref} not in [{lo},{hi}]")
+    # gate 2a: an earlier buy of this asset whose outcome is still unknown
+    if unresolved_orders(ticket["asset_id"]):
+        raise risk.Reject("unresolved_order", "an earlier buy of it is still unconfirmed")
     # gate 2b: entry timing -- from the same read, no second call
     info = marketdata.last_info(ticket["asset_id"])
     _entry_timing(ticket, info)
@@ -148,6 +151,17 @@ def _entry_timing(ticket, info):
 
 
 DEFERRED = object()   # _run_gates: 'not now'; the ticket is untouched
+
+
+class _Halted(Exception):
+    """STOP landed while the order was being prepared."""
+
+
+def _last_look():
+    """Immediately before money moves, after every preparatory read: a STOP
+    tapped during a slow price or balance read must still win."""
+    if state.get_mode() != "NORMAL":
+        raise _Halted(state.get_mode())
 
 
 def _run_gates(ticket, total_value, marks_fresh):
@@ -316,6 +330,9 @@ def _sanity_qty(qty, price, spent):
                            f"vs ${spent:.2f} paid")
 
 
+_CB_TERMINAL = ("FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED")
+
+
 def _await_coinbase(order_id, timeout=None):
     """Poll one order -- by the exchange's order_id, never a list read -- to a
     terminal state. Returns (filled_qty, avg_price, gross_usd, fee_usd, status).
@@ -323,13 +340,12 @@ def _await_coinbase(order_id, timeout=None):
     gross + fee, a sell yields gross - fee. Returning the sum for both sides
     overstated every Coinbase sell's proceeds by twice the fee."""
     timeout = config.FILL_TIMEOUT_CEX_SEC if timeout is None else timeout
-    terminal = ("FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED")
     t0, last = time.time(), None
     while True:
         o = coinbase.order_status(order_id)
         if o:
             last = o
-            if (o.get("status") or "").upper() in terminal:
+            if (o.get("status") or "").upper() in _CB_TERMINAL:
                 break
         if time.time() - t0 >= timeout:
             break
@@ -474,6 +490,43 @@ def _measure_proceeds(read_delta, read_balance, before, estimate):
     return float(estimate or 0), False
 
 
+def unresolved_orders(asset_id=None, days=2):
+    """Buys broadcast (or placed) whose outcome the bot never learned."""
+    since = time.time() - days * 86400
+    if asset_id:
+        return journal.query("SELECT * FROM orders WHERE status='unresolved' AND ts>? "
+                             "AND asset_id=?", (since, asset_id))
+    return journal.query("SELECT * FROM orders WHERE status='unresolved' AND ts>?", (since,))
+
+
+def unresolved_notional():
+    """Worst case: every unresolved buy landed. Reserved against the caps."""
+    return sum(float(r["notional_usd"] or 0) for r in unresolved_orders())
+
+
+def _book_landed(asset, chain, tx, got, spent, ref):
+    """One landed fill, booked exactly once: on top of an existing position
+    if there is one (an ADD that timed out is still an ADD), and never twice
+    for the same transaction."""
+    if journal.query("SELECT 1 FROM fills WHERE tx_ref=? AND side='buy'", (tx,)):
+        return False
+    pos = state.get_position(asset)
+    stop = ref * (1 - config.STOP_LOSS_PCT) if ref else None
+    if pos:
+        state.upsert_position(asset, chain, chain if chain != "coinbase" else None, got, spent)
+    else:
+        state.upsert_position(asset, chain, chain if chain != "coinbase" else None, got, spent,
+                              invalidation=stop)
+    state.set_cash(chain, state.cash(chain) - spent)
+    journal.log_fill(client_oid=tx, asset_id=asset, side="buy", qty=got,
+                     price=(spent / got) if got else None, fee_usd=None, venue=chain, tx_ref=tx)
+    sym = alerts.symbol(asset)
+    alerts.ops((f"My earlier {sym} buy did go through: {got:.6g} units for ${spent:.2f}, "
+                + ("added to the position I already hold." if pos else
+                   f"now on the books with a stop at {stop:.4g}." if stop else "booked.")))
+    return True
+
+
 def resolve_unresolved_orders(days=2):
     """Buys whose broadcast outcome was never learned: ask the chain again.
     Landed -> book the position with its stop and say so. Failed -> close the
@@ -484,13 +537,25 @@ def resolve_unresolved_orders(days=2):
     for r in rows:
         chain, asset, tx = r["venue"], r["asset_id"], r["client_oid"]
         token = asset.split(":", 1)[1]
+        spent = float(r["notional_usd"] or 0)
         try:
             if chain == "solana":
                 st = solana_dex.confirm(tx)
                 got = solana_dex.tx_token_delta(tx, token) if st in ("confirmed", "finalized") else None
-            else:
+            elif chain == "base":
                 st = evm_dex.confirm(tx)
                 got = evm_dex.tx_token_delta(tx, token) if st == "confirmed" else None
+            else:                                   # coinbase: the venue keeps the truth
+                o = coinbase.order_status(tx) or {}
+                st = (o.get("status") or "UNKNOWN").upper()
+                if st not in _CB_TERMINAL:
+                    _cancel_quietly(tx)
+                    continue
+                got = float(o.get("filled_size") or 0)
+                spent = (float(o.get("filled_value") or 0) or got * float(o.get("average_filled_price") or 0)) \
+                    + float(o.get("total_fees") or 0)
+                if got <= 0:
+                    st = "failed"
         except Exception as e:
             journal.log_event("unresolved_order_read_fail", asset, str(e)[:120])
             continue
@@ -499,19 +564,8 @@ def resolve_unresolved_orders(days=2):
             continue
         if not got or got <= 0:
             continue
-        if not state.get_position(asset):
-            ref = r["limit_price"] or 0
-            stop = ref * (1 - config.STOP_LOSS_PCT) if ref else None
-            state.upsert_position(asset, chain, chain, got, r["notional_usd"] or 0,
-                                  invalidation=stop)
-            state.set_cash(chain, state.cash(chain) - (r["notional_usd"] or 0))
-            journal.log_fill(client_oid=tx, asset_id=asset, side="buy", qty=got,
-                             price=(r["notional_usd"] or 0) / got, fee_usd=None,
-                             venue=chain, tx_ref=tx)
-            alerts.ops(f"My earlier {alerts.symbol(asset)} buy did go through: "
-                       f"{got:.6g} units for ${r['notional_usd'] or 0:.2f}, now on the "
-                       f"books with a stop at {stop:.4g}." if stop else
-                       f"My earlier {alerts.symbol(asset)} buy did go through; booked it.")
+        with _order_lock:
+            _book_landed(asset, chain, tx, got, spent, r["limit_price"] or 0)
         _set_order_status(r["order_id"], "resolved")
 
 
@@ -655,11 +709,19 @@ def execute_buy(ticket, ref_price):
             product = asset.split(":", 1)[1]
             _bid, ask = coinbase.best_price(product)
             limit = (ask or ref_price) * 1.0025  # marketable limit, tier cap
+            _last_look()
             oid, _ = coinbase.limit_buy(product, notional, limit)
             qty, avg, gross, fee, st = _await_coinbase(oid)
+            if st not in _CB_TERMINAL:
+                # Cancel the remainder, then read the FINAL state: units can
+                # fill between the last poll and the cancel landing.
+                _cancel_quietly(oid)
+                qty, avg, gross, fee, st = _await_coinbase(oid, timeout=15)
+                if st not in _CB_TERMINAL:
+                    _mark_order_unresolved(str(oid), "coinbase", asset, notional, ref_price,
+                                           f"order state {st} after cancel")
+                    raise RuntimeError(f"order state unknown ({st})")
             spent = gross + fee
-            if st != "FILLED":
-                _cancel_quietly(oid)  # stop the unfilled remainder
             if qty <= 0:
                 raise RuntimeError(f"no fill ({st})")
             fill_price = avg or limit
@@ -667,8 +729,10 @@ def execute_buy(ticket, ref_price):
             mint = asset.split(":", 1)[1]
             dec = solana_dex.token_decimals(mint)
             before, _ = solana_dex.token_balance(mint)
+            _last_look()
             sig, q = solana_dex.swap(solana_dex.USDC_MINT, mint,
                                      int(notional * 1e6), 300)
+            oid = sig            # known now: a timeout below must not forget it
             res = _await_solana(sig)
             if res == "failed":
                 raise RuntimeError("swap failed on-chain")
@@ -682,10 +746,10 @@ def execute_buy(ticket, ref_price):
                 lambda: solana_dex.token_balance(mint)[0], before, dec,
                 fallback_raw=int((q or {}).get("outAmount") or 0))
             spent, fill_price = notional, ref_price
-            oid = sig
         elif chain == "base":
             token = asset.split(":", 1)[1]
             before, dec = evm_dex.token_balance(token)
+            _last_look()
             oid = evm_dex.swap(evm_dex.USDC, token, int(notional * 1e6), 300)
             res = _await_evm(oid)
             if res == "failed":
@@ -702,6 +766,11 @@ def execute_buy(ticket, ref_price):
             raise RuntimeError(f"venue {venue}/{chain} not automatable")
         if qty is None or qty <= 0:
             raise RuntimeError("zero quantity filled")
+    except _Halted as h:
+        state.set_ticket_status(ticket["ticket_id"], "blocked:halt")
+        state.del_kv(_defer_key(ticket))
+        journal.log_event("buy_halted_at_order", asset, str(h))
+        return "blocked"
     except Exception as e:
         journal.log_event("buy_failed", asset, str(e))
         state.set_ticket_status(ticket["ticket_id"], "failed")

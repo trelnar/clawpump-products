@@ -34,6 +34,11 @@ def check_buy(asset_id, venue, chain, notional_usd, ref_price, limit_price,
     positions = state.positions()
     pos = state.get_position(asset_id)
     existing_cost = pos["cost_basis_usd"] if pos else 0.0
+    # Buys whose outcome is still unknown are exposure until proven otherwise.
+    from . import execution
+    pending = execution.unresolved_notional()
+    existing_cost += sum(float(o["notional_usd"] or 0)
+                         for o in execution.unresolved_orders(asset_id))
 
     # hard limit 1: 5% cost-basis cap, adds included, worst-case at limit price
     if existing_cost + notional_usd > config.MAX_POSITION_PCT * total_value + 1e-9:
@@ -42,7 +47,7 @@ def check_buy(asset_id, venue, chain, notional_usd, ref_price, limit_price,
 
     if not pos and len(positions) >= config.MAX_CONCURRENT_POSITIONS:
         raise Reject("max_concurrent", str(len(positions)))
-    if _deployed(positions) + notional_usd > config.MAX_AGGREGATE_DEPLOYED_PCT * total_value:
+    if _deployed(positions) + pending + notional_usd > config.MAX_AGGREGATE_DEPLOYED_PCT * total_value:
         raise Reject("aggregate_deployed", "")
     venue_cost = sum(p["cost_basis_usd"] for p in positions if p["venue"] == venue)
     if venue_cost + notional_usd > config.MAX_PER_VENUE_PCT * total_value:

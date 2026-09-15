@@ -340,7 +340,7 @@ class CoinbaseBuy(Base):
         execution.execute_buy(ticket("cex:IDD-USD", "coinbase", None, 5.0), 1.5)
         self.assertEqual(set(seen), {"srv-42"})
 
-    def test_rejected_order_books_nothing_and_cancels_that_order(self):
+    def test_rejected_order_books_nothing_and_needs_no_cancel(self):
         cancelled = []
         self.patch(coinbase, "best_price", lambda p: (1.49, 1.5))
         self.patch(coinbase, "limit_buy", lambda p, n, l: ("srv-7", {}))
@@ -349,7 +349,7 @@ class CoinbaseBuy(Base):
         r = execution.execute_buy(ticket("cex:BBB-USD", "coinbase", None, 5.0), 5.0)
         self.assertEqual(r, "failed")
         self.assertIsNone(state.get_position("cex:BBB-USD"))
-        self.assertEqual(cancelled, ["srv-7"])
+        self.assertEqual(cancelled, [])          # REJECTED is terminal: nothing to cancel
 
 
 class ApprovedBuyGates(Base):

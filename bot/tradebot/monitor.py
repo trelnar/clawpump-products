@@ -174,13 +174,16 @@ def reconcile_cash():
     """portfolio-state reconciliation (v1): pull venue balances into the cash
     table. Per-venue failures are logged, never fatal."""
     from .exchanges import coinbase, evm_dex, solana_dex
-    for venue, fn in (("coinbase", coinbase.usdc_balance),
-                      ("solana", solana_dex.usdc_balance),
-                      ("base", evm_dex.usdc_balance)):
-        try:
-            state.set_cash(venue, fn())
-        except Exception as e:
-            journal.log_event("recon_fetch_fail", detail=f"{venue}: {e}")
+    # Under the order lock: an absolute balance written between a swap
+    # landing and its booking is debited twice by the booking that follows.
+    with execution._order_lock:
+        for venue, fn in (("coinbase", coinbase.usdc_balance),
+                          ("solana", solana_dex.usdc_balance),
+                          ("base", evm_dex.usdc_balance)):
+            try:
+                state.set_cash(venue, fn())
+            except Exception as e:
+                journal.log_event("recon_fetch_fail", detail=f"{venue}: {e}")
 
 
 def portfolio_value():

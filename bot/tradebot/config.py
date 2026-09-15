@@ -160,6 +160,7 @@ HL_ORDER_USD = float(env("HL_ORDER_USD", "15"))     # a 75% partial cover must i
 HL_MARGIN_BUFFER = 1.2                               # account value needed per $1 of notional
 HL_FEE_RATE = 0.00045                                # taker, per side
 HL_SLIPPAGE = 0.01
+HL_HTTP_TIMEOUT = float(env("HL_HTTP_TIMEOUT", "15"))     # the SDK's default is none
 HL_MIN_VOLUME_USD = float(env("HL_MIN_VOLUME_USD", "2000000"))
 HL_PUMP_MIN = float(env("HL_PUMP_MIN", "0.12"))      # 24h gain that makes a short candidate
 HL_CANDIDATES = int(env("HL_CANDIDATES", "6"))
@@ -224,6 +225,10 @@ RUG_BLOCKED_DEXES = [x.strip().lower() for x in env(
     "RUG_BLOCKED_DEXES", "pumpfun,moonshot").split(",") if x.strip()]   # bonding curves
 RUG_MAX_TOP10_SHARE = float(env("RUG_MAX_TOP10_SHARE", "0.40"))    # of supply, pool excluded
 RUG_HOLDER_CHECK = env("RUG_HOLDER_CHECK", "1") == "1"             # Solana only (keyless RPC)
+# Without a full holder census (getProgramAccounts, when the RPC allows it)
+# only the 20 largest accounts are visible. Refuse when they cover less than
+# this share of the non-pool supply: what is unseen cannot be bounded.
+RUG_MIN_HOLDER_COVERAGE = float(env("RUG_MIN_HOLDER_COVERAGE", "0.40"))
 MONITOR_INTERVAL_TOKEN_SEC = 5
 MONITOR_INTERVAL_CEX_SEC = 10
 VALUE_SAMPLE_SEC = 60            # rolling value series sampling

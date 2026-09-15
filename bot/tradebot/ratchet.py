@@ -187,7 +187,10 @@ def on_tick(p, q, now=None):
     else:
         st = {**_new(p), "hwm": entry, "hwm_ts": p["entry_ts"], "entry_anchor": entry, **st}
     write_bar(asset, q, now)             # bars continue after the share is sold
-    if st["done"]:
+    # 'done' is a real sale. A shadow sale only quiets the shadow: switching
+    # to LIVE afterwards must find the budget intact, not a marker that says
+    # the position was already sold.
+    if st["done"] or (mode() != "live" and st.get("shadow_done")):
         return None
     minute = int(now // 60)
 
@@ -285,8 +288,12 @@ def _fire(p, st, q, trigger, entry, now):
             (asset, st["entry_ts"], entry, st["armed_ts"], trigger, price, now, fraction,
              st["hwm"], st["floor"], sigma15(st), price, now))
         journal.conn().commit()
-    st["sold"].append({"trigger": trigger, "price": price, "ts": now})
-    st["budget_qty"], st["done"] = 0.0, True
+    st["sold"].append({"trigger": trigger, "price": price, "ts": now,
+                       **({} if mode() == "live" else {"shadow": True})})
+    if mode() == "live":
+        st["budget_qty"], st["done"] = 0.0, True
+    else:
+        st["shadow_done"] = True
 
 
 # --- lifecycle hooks ----------------------------------------------------------------
