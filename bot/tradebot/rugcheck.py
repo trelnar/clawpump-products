@@ -76,15 +76,22 @@ def top_holders_share(mint, pair_address=None, top=10):
     vaults = set(AMM_AUTHORITIES)
     if pair_address:
         vaults.add(pair_address)
-    holders = [(a, amt) for a, amt in accts if owners.get(a) not in vaults]
+    held = [(a, amt) for a, amt in accts if owners.get(a) not in vaults]
     assumed = False
-    if len(holders) == len(accts) and holders:
-        holders = holders[1:]          # no vault found: the largest is the pool
+    if len(held) == len(accts) and held:
+        held = held[1:]                # no vault found: the largest is the pool
         assumed = True
-    holders.sort(key=lambda x: -x[1])
-    share = sum(amt for _a, amt in holders[:top]) / total
+    # A wallet, not a token account: one deployer spread over nineteen
+    # accounts is one holder. Sum by owner before ranking.
+    by_owner = {}
+    for a, amt in held:
+        key = owners.get(a) or a
+        by_owner[key] = by_owner.get(key, 0) + amt
+    ranked = sorted(by_owner.values(), reverse=True)
+    share = sum(ranked[:top]) / total
     return share, {"top10_share": round(share, 3), "accounts_read": len(accts),
-                   "vaults_excluded": len(accts) - len(holders) - (1 if assumed else 0),
+                   "wallets": len(by_owner),
+                   "vaults_excluded": len(accts) - len(held) - (1 if assumed else 0),
                    "pool_assumed": assumed}
 
 

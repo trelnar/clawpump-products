@@ -47,6 +47,7 @@ def tick():
             seen.add(r["asset_id"])
             assets.append(r["asset_id"])
     assets = assets[:config.TRACK_BATCH]
+    seen = set(assets)                          # what will actually be marked
     for r in pending:
         if r["asset_id"] not in seen:
             assets.append(r["asset_id"])
@@ -60,15 +61,18 @@ def tick():
         px = marks.get(r["asset_id"])
         if not px or px <= 0:
             continue
-        updates.append(_advance(r, px, now))
+        u = _advance(r, px, now)
+        if u is None:
+            continue
+        updates.append(u)
         touched.add(r["asset_id"])
     with journal._lock:
         c = journal.conn()
         for u in updates:
             c.execute(
                 "UPDATE forecast_tracking SET max_price=?, min_price=?, max_6h=?, min_6h=?, "
-                "end_6h=?, stop_ts=?, target_ts=?, last_ts=?, samples=COALESCE(samples,0)+1 "
-                "WHERE forecast_id=? AND resolved=0", u)
+                "end_6h=?, end_ts=?, stop_ts=?, target_ts=?, last_ts=?, "
+                "samples=COALESCE(samples,0)+1 WHERE forecast_id=? AND resolved=0", u)
         c.commit()
     for r in rows:
         if now - r["start_ts"] >= config.TRACK_WINDOW_SEC:
@@ -124,15 +128,19 @@ def _advance(r, px, now):
     reached it or been stopped out on the way. Those are different numbers,
     and only the second one is money."""
     start = r["start_price"] or 0
-    in_win = (now - (r["start_ts"] or 0)) <= config.P30_WINDOW_SEC
+    age = now - (r["start_ts"] or 0)
+    if age > config.TRACK_WINDOW_SEC:
+        return None            # past its horizon: a late print is not part of the record
+    in_win = age <= config.P30_WINDOW_SEC
     max_p = max(r["max_price"] or start, px)
     min_p = min(r.get("min_price") or start, px)
     max6, min6, end6 = r.get("max_6h"), r.get("min_6h"), r.get("end_6h")
+    end_ts = r.get("end_ts")
     stop_ts, target_ts = r.get("stop_ts"), r.get("target_ts")
     if in_win:
         max6 = max(max6 or 0, px)
         min6 = min(min6 or start, px)
-        end6 = px
+        end6, end_ts = px, now
         target, stop, short = _thresholds(r["asset_id"])
         if start > 0:
             hit_stop = px >= start * (1 + stop) if short else px <= start * (1 - stop)
@@ -141,7 +149,7 @@ def _advance(r, px, now):
                 stop_ts = now
             if hit_target and target_ts is None:
                 target_ts = now
-    return (max_p, min_p, max6, min6, end6, stop_ts, target_ts, now, r["forecast_id"])
+    return (max_p, min_p, max6, min6, end6, end_ts, stop_ts, target_ts, now, r["forecast_id"])
 
 
 def _sim(r):
@@ -163,6 +171,13 @@ def _sim(r):
     if tt:
         return "target", target - fee
     if end and start > 0:
+        # 'Flat' is only a result if the end of the window was actually
+        # watched. One print at +5 min and silence until resolution is not
+        # a +16% trade; it is a gap in coverage.
+        end_ts, start_ts = r.get("end_ts"), r.get("start_ts") or 0
+        deadline = start_ts + config.P30_WINDOW_SEC
+        if end_ts is not None and end_ts < deadline - 3 * config.TRACK_INTERVAL_SEC:
+            return None, None
         ret = end / start - 1
         return "flat", (-ret if short else ret) - fee
     return "flat", -fee
@@ -259,7 +274,8 @@ def scorecard(days=30):
     if not rows:
         return f"No forecasts have resolved yet (window {config.TRACK_WINDOW_SEC/3600:.0f}h)."
     out = [f"SCORECARD {days}d — resolved forecasts by the action taken "
-           f"({config.TRACK_INTERVAL_SEC // 60}-min samples)"]
+           f"({config.TRACK_INTERVAL_SEC // 60}-min samples; sim assumes the stop fills "
+           f"at -{config.STOP_LOSS_PCT:.0%}, which a rug does not honour)"]
     for r in rows:
         n = r["n"] or 1
         perp = (r["a"] or "").endswith("/perp")

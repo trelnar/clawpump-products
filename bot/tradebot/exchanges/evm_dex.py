@@ -224,12 +224,18 @@ def swap(token_in, token_out, amount_raw, slippage_bps):
     if config.SIMULATE_BEFORE_SEND:
         w3.eth.call(tx)   # reverts here rather than costing gas on-chain
     signed = acct.sign_transaction(tx)
+    # The hash is a function of the signed bytes: known before the send, so
+    # a broadcast whose answer never arrives can still be followed up.
+    h = w3.to_hex(w3.keccak(signed.raw_transaction))
     try:
-        h = w3.to_hex(w3.eth.send_raw_transaction(signed.raw_transaction))
+        w3.eth.send_raw_transaction(signed.raw_transaction)
     except Exception as e:
-        if "timed out" in repr(e) or "timeout" in repr(e).lower():
-            raise SendAmbiguous(f"send timed out; state unknown: {e}")
-        raise
+        if "429" in repr(e) or "Too Many" in repr(e):
+            raise                    # refused before it was looked at: safe to retry
+        # A timeout, a dropped connection, any other transport failure: the
+        # node may have taken it. Re-sending would read a fresh nonce and
+        # swap twice. Return the hash; confirmation decides what happened.
+        journal.log_event("evm_send_ambiguous", detail=f"{h}: {str(e)[:120]}")
     journal.log_order(client_oid=h, venue="base",
                       asset_id=f"base:{token_out if token_in == USDC else token_in}",
                       side="buy" if token_in == USDC else "sell",

@@ -136,6 +136,8 @@ def candidates(limit=None):
 def _gate(ticket, ignore_age=False):
     """Reasons not to open. Returns None when clear."""
     asset = ticket["asset_id"]
+    if not enabled():
+        return "shorts_off"      # an approved ticket outlives a restart that turned them off
     if state.get_mode() != "NORMAL":
         return f"halt: {state.get_mode()}"
     if get(asset):
@@ -272,7 +274,11 @@ def _cover(asset, fraction, reason):
     journal.log_fill(client_oid=str(oid), asset_id=asset, side="cover", qty=filled, price=px,
                      fee_usd=round(fee, 4), venue="hyperliquid", tx_ref=str(oid))
     remaining = r["qty"] - filled
-    if full or share >= 0.999 or remaining <= 0:
+    # What is left is what the venue still holds, not what we asked for: a
+    # market close is an IOC order and can fill in part. Deleting the row on
+    # the request left the rest short with no stop until reconciliation.
+    dust = remaining * px < 1.0
+    if remaining <= 0 or share >= 0.999 or dust:
         _delete(asset)
         total = prior + pnl
         if config.WHITELIST_REAPPROVE_AFTER_LOSS and total < -config.LOSS_THRESHOLD_USD:
@@ -284,6 +290,8 @@ def _cover(asset, fraction, reason):
         _write({**r, "qty": remaining, "notional_usd": remaining * r["entry_price"],
                 "ratchet": json.dumps(rs)})
         remaining_usd = remaining * px
+        if full:
+            journal.log_event("cover_partial", asset, {"asked": r["qty"], "filled": filled})
     alerts.covered(asset, pnl, pnl / cost if cost else None, reason, share, remaining_usd)
     return "filled"
 
@@ -397,7 +405,17 @@ def monitor(now=None):
                     after = dict(after)
                     after["ratchet"] = json.dumps(rs2)
                     _write(after)
-            continue
+            elif res == "failed" and after and hl.round_size(r["coin"], rs["budget"]) <= 0:
+                # a residual too small to trade is not a budget: stop retrying it
+                rs2 = json.loads(after["ratchet"] or "{}")
+                rs2["budget"], rs2["done"] = 0.0, True
+                after = dict(after)
+                after["ratchet"] = json.dumps(rs2)
+                _write(after)
+            if not after or res in ("gone", "no_position"):
+                continue
+            r = dict(after)               # fall through: the max-hold exit must stay reachable
+            rs = json.loads(r["ratchet"] or "{}")
         r["ratchet"] = json.dumps(rs)
         _write(r)
         if now - r["entry_ts"] >= config.HL_MAX_HOLD_SEC:

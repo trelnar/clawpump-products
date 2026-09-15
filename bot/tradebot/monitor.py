@@ -97,6 +97,12 @@ def reconcile_positions():
     anomaly. This is the mechanism that would have caught them as anomalies."""
     from .exchanges import evm_dex, solana_dex
     from . import alerts
+    # Buys whose broadcast outcome was never learned come first: a landed
+    # one is an orphan until it is booked.
+    try:
+        execution.resolve_unresolved_orders()
+    except Exception as e:
+        journal.log_event("unresolved_orders_error", detail=repr(e)[:160])
     problems = []
     booked = {p["asset_id"]: p for p in state.positions()}
 

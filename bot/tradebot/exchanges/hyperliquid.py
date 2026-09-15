@@ -61,9 +61,13 @@ def sz_decimals(coin):
 
 
 def round_size(coin, sz, up=False):
+    """Idempotent: an already-valid size comes back unchanged. Subtracting an
+    epsilon before flooring turned 0.0043 into 0.0042 and, rounded again on
+    the way to the order, 0.0041 -- one lot became none."""
     d = sz_decimals(coin)
-    f = math.ceil if up else math.floor
-    return f(sz * 10 ** d - 1e-9 if not up else sz * 10 ** d) / 10 ** d
+    lots = sz * 10 ** d
+    n = math.ceil(lots - 1e-9) if up else math.floor(lots + 1e-9)
+    return n / 10 ** d
 
 
 def mids():

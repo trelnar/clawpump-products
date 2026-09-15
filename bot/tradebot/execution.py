@@ -358,7 +358,11 @@ def _await_solana(sig, timeout=None):
     timeout = config.FILL_TIMEOUT_SOL_SEC if timeout is None else timeout
     t0 = time.time()
     while time.time() - t0 < timeout:
-        st = solana_dex.confirm(sig)
+        try:
+            st = solana_dex.confirm(sig)
+        except Exception as e:      # a dead RPC is not a failed swap: keep asking
+            journal.log_event("confirm_read_fail", detail=f"{sig}: {str(e)[:100]}")
+            st = "unknown"
         if st in ("confirmed", "finalized"):
             return "ok"
         if st == "failed":
@@ -373,7 +377,11 @@ def _await_evm(tx_hash, timeout=None):
     timeout = config.FILL_TIMEOUT_EVM_SEC if timeout is None else timeout
     t0 = time.time()
     while time.time() - t0 < timeout:
-        st = evm_dex.confirm(tx_hash)
+        try:
+            st = evm_dex.confirm(tx_hash)
+        except Exception as e:
+            journal.log_event("confirm_read_fail", detail=f"{tx_hash}: {str(e)[:100]}")
+            st = "unknown"
         if st in ("confirmed", "failed"):
             return st
         time.sleep(5)
@@ -401,7 +409,7 @@ def _landed_by_balance(read_raw, before, tx_ref):
     raise RuntimeError(f"swap timeout and no tokens arrived ({tx_ref})")
 
 
-def _settled_qty(read_raw, before, decimals, fallback_raw=0):
+def _settled_qty(read_raw, before, decimals, fallback_raw=0, read_exact=None):
     """Quantity received by a swap that has ALREADY confirmed.
 
     Past this point the money is spent and the tokens are ours, so a failed or
@@ -421,6 +429,14 @@ def _settled_qty(read_raw, before, decimals, fallback_raw=0):
             time.sleep(config.SETTLE_READ_SLEEP_SEC)
     journal.log_event("settle_read_unresolved",
                       detail=f"{last_err}" if last_err else "balance unchanged")
+    if read_exact is not None:
+        # The transaction's own balance change: exact, and not a balance read.
+        try:
+            got = read_exact()
+            if got and got > 0:
+                return float(got), True
+        except Exception as e:
+            journal.log_event("settle_exact_read_fail", detail=str(e)[:120])
     if fallback_raw > 0:
         return fallback_raw / (10 ** decimals), False
     raise RuntimeError(f"swap confirmed but quantity unreadable: {last_err}")
@@ -456,6 +472,66 @@ def _measure_proceeds(read_delta, read_balance, before, estimate):
     journal.log_event("proceeds_unresolved",
                       detail=f"{last_err}" if last_err else "balance unchanged")
     return float(estimate or 0), False
+
+
+def resolve_unresolved_orders(days=2):
+    """Buys whose broadcast outcome was never learned: ask the chain again.
+    Landed -> book the position with its stop and say so. Failed -> close the
+    order. Still unknown -> try again next pass."""
+    since = time.time() - days * 86400
+    rows = journal.query("SELECT order_id, client_oid, venue, asset_id, notional_usd, "
+                         "limit_price FROM orders WHERE status='unresolved' AND ts>?", (since,))
+    for r in rows:
+        chain, asset, tx = r["venue"], r["asset_id"], r["client_oid"]
+        token = asset.split(":", 1)[1]
+        try:
+            if chain == "solana":
+                st = solana_dex.confirm(tx)
+                got = solana_dex.tx_token_delta(tx, token) if st in ("confirmed", "finalized") else None
+            else:
+                st = evm_dex.confirm(tx)
+                got = evm_dex.tx_token_delta(tx, token) if st == "confirmed" else None
+        except Exception as e:
+            journal.log_event("unresolved_order_read_fail", asset, str(e)[:120])
+            continue
+        if st == "failed":
+            _set_order_status(r["order_id"], "failed")
+            continue
+        if not got or got <= 0:
+            continue
+        if not state.get_position(asset):
+            ref = r["limit_price"] or 0
+            stop = ref * (1 - config.STOP_LOSS_PCT) if ref else None
+            state.upsert_position(asset, chain, chain, got, r["notional_usd"] or 0,
+                                  invalidation=stop)
+            state.set_cash(chain, state.cash(chain) - (r["notional_usd"] or 0))
+            journal.log_fill(client_oid=tx, asset_id=asset, side="buy", qty=got,
+                             price=(r["notional_usd"] or 0) / got, fee_usd=None,
+                             venue=chain, tx_ref=tx)
+            alerts.ops(f"My earlier {alerts.symbol(asset)} buy did go through: "
+                       f"{got:.6g} units for ${r['notional_usd'] or 0:.2f}, now on the "
+                       f"books with a stop at {stop:.4g}." if stop else
+                       f"My earlier {alerts.symbol(asset)} buy did go through; booked it.")
+        _set_order_status(r["order_id"], "resolved")
+
+
+def _mark_order_unresolved(oid, chain, asset, notional, ref_price, why):
+    """The venue adapter journals the order when it broadcasts; this marks
+    that same row, or writes one if the adapter never got that far."""
+    with journal._lock:
+        journal.conn().execute(
+            "INSERT INTO orders (ts, client_oid, venue, asset_id, side, notional_usd, "
+            "limit_price, status, detail) VALUES (?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(client_oid) DO UPDATE SET status='unresolved', detail=excluded.detail, "
+            "notional_usd=excluded.notional_usd, limit_price=excluded.limit_price",
+            (time.time(), oid, chain, asset, "buy", notional, ref_price, "unresolved", why))
+        journal.conn().commit()
+
+
+def _set_order_status(order_id, status):
+    with journal._lock:
+        journal.conn().execute("UPDATE orders SET status=? WHERE order_id=?", (status, order_id))
+        journal.conn().commit()
 
 
 def repair_zero_proceeds(days=30):
@@ -563,9 +639,17 @@ def execute_buy(ticket, ref_price):
     and the dollars it actually spent. Nothing is booked before confirmation."""
     asset, venue, chain = ticket["asset_id"], ticket["venue"], ticket.get("chain")
     notional = ticket["notional_usd"]
+    # The halt gate ran before the venue work; a STOP tapped during that work
+    # must still win. Last look, under the order lock, right before money moves.
+    if state.get_mode() != "NORMAL":
+        state.set_ticket_status(ticket["ticket_id"], "blocked:halt")
+        state.del_kv(_defer_key(ticket))
+        journal.log_event("buy_halted_at_order", asset, state.get_mode())
+        return "blocked"
     entry_liq = _entry_liquidity(asset, chain)  # baseline before we move the pool
     measured = True
     fee = None                                   # venue fee when the venue reports one
+    oid = None
     try:
         if venue == "coinbase":
             product = asset.split(":", 1)[1]
@@ -610,7 +694,9 @@ def execute_buy(ticket, ref_price):
                 res = _landed_by_balance(lambda: evm_dex.token_balance(token)[0],
                                          before, oid)
             qty, measured = _settled_qty(
-                lambda: evm_dex.token_balance(token)[0], before, dec)
+                lambda: evm_dex.token_balance(token)[0], before, dec,
+                fallback_raw=int(notional / ref_price * 10 ** dec) if ref_price else 0,
+                read_exact=lambda: evm_dex.tx_token_delta(oid, token, decimals=dec))
             spent, fill_price = notional, ref_price
         else:
             raise RuntimeError(f"venue {venue}/{chain} not automatable")
@@ -620,7 +706,15 @@ def execute_buy(ticket, ref_price):
         journal.log_event("buy_failed", asset, str(e))
         state.set_ticket_status(ticket["ticket_id"], "failed")
         state.del_kv(_defer_key(ticket))
-        alerts.not_bought(asset, "execution", str(e)[:120])
+        if oid and chain in ("solana", "base") and "on-chain" not in str(e):
+            # Broadcast, outcome unknown. A swap that lands after we gave up
+            # is real tokens with no row, no stop and no FLATTEN. Remember it;
+            # reconciliation re-reads the transaction until it is settled.
+            _mark_order_unresolved(str(oid), chain, asset, notional, ref_price, str(e)[:200])
+            alerts.ops(f"I could not confirm whether my {alerts.symbol(asset)} buy went "
+                       "through. I'll keep checking the chain and adopt it if it did.")
+        else:
+            alerts.not_bought(asset, "execution", str(e)[:120])
         return "failed"
     state.del_kv(_defer_key(ticket))
 

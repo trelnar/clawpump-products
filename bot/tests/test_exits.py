@@ -523,9 +523,18 @@ class SimOutcome(Base):
         self.patch(calibration.config, "STOP_LOSS_PCT", 0.15)
         self.patch(calibration.config, "SIM_FRICTION", 0.04)
 
-    def _run(self, asset, start, samples, action="BUY_NOW"):
+    def _run(self, asset, start, samples, action="BUY_NOW", near_end=True):
+        self.patch(calibration.config, "TRACK_WINDOW_SEC", 12 * 3600)
         fid = journal.log_forecast({"asset_id": asset, "action": action, "p30": 0.5})
         calibration.open_tracking(fid, asset, action, start)
+        if near_end:
+            # the call was made just under six hours ago: the samples land at
+            # the end of the window, where a 'flat' result is actually observed
+            with journal._lock:
+                journal.conn().execute("UPDATE forecast_tracking SET start_ts=start_ts-? "
+                                       "WHERE forecast_id=?",
+                                       (calibration.config.P30_WINDOW_SEC - 120, fid))
+                journal.conn().commit()
         for px in samples:
             self.patch(calibration.marketdata, "marks", lambda a, px=px: ({asset: px}, True))
             calibration.tick()
@@ -562,6 +571,25 @@ class SimOutcome(Base):
         o = self._run("solana:SIM3", 1.0, [1.05, 1.10])
         self.assertEqual(o["sim_result"], "flat")
         self.assertAlmostEqual(o["sim_return"], 0.06)
+
+    def test_an_unwatched_end_of_window_is_not_a_flat_result(self):
+        o = self._run("solana:GAP", 1.0, [1.16], near_end=False)   # one print at +0, then silence
+        self.assertIsNone(o["sim_result"])
+        self.assertIsNone(o["sim_return"])
+
+    def test_a_print_after_the_horizon_is_not_part_of_the_record(self):
+        fid = journal.log_forecast({"asset_id": "solana:LATE", "action": "PASS", "p30": 0.1})
+        calibration.open_tracking(fid, "solana:LATE", "PASS", 1.0)
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:LATE": 1.0}, True))
+        calibration.tick()
+        with journal._lock:                                  # tracker was down for a day
+            journal.conn().execute("UPDATE forecast_tracking SET start_ts=start_ts-86400")
+            journal.conn().commit()
+        self.patch(calibration.marketdata, "marks", lambda a: ({"solana:LATE": 3.0}, True))
+        calibration.tick()                                   # 3x, 24h later: not counted
+        o = journal.query("SELECT * FROM outcomes WHERE forecast_id=?", (fid,))[0]
+        self.assertEqual(o["hit_2x"], 0)
+        self.assertAlmostEqual(o["max_multiple"], 1.0)
 
     def test_a_short_thesis_is_mirrored(self):
         self.patch(calibration.config, "HL_TARGET", 0.08)

@@ -31,8 +31,18 @@ class Base(unittest.TestCase):
         state.set_kv("ratchet_mode", "")
         self.patch(config, "RATCHET_MODE", "shadow")
         self.sold = []
-        self.patch(execution, "execute_sell",
-                   lambda a, r, f=1.0: self.sold.append((a, r, f)) or "filled")
+
+        def sell(a, r, f=1.0):            # a stub that moves the books like the real one
+            self.sold.append((a, r, f))
+            pos = state.get_position(a)
+            if pos:
+                if f >= 0.999:
+                    state.close_position(a)
+                else:
+                    state.upsert_position(a, pos["venue"], pos["chain"], -pos["qty"] * f,
+                                          -pos["cost_basis_usd"] * f)
+            return "filled"
+        self.patch(execution, "execute_sell", sell)
 
     def patch(self, mod, name, value):
         self.patches.append((mod, name, getattr(mod, name, None)))
@@ -307,3 +317,34 @@ class Report(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PartialFill(Base):
+    """A partial fill keeps the rest of the ratchet's budget (validation #8)."""
+
+    def test_half_a_fill_leaves_half_the_budget_and_fires_again(self):
+        from tradebot import core
+        core.ratchet_text("LIVE")
+        self.addCleanup(core.ratchet_text, "SHADOW")
+
+        def half(a, r, f=1.0):                      # the venue fills half of what was asked
+            self.sold.append((a, r, f))
+            pos = state.get_position(a)
+            state.upsert_position(a, pos["venue"], pos["chain"], -pos["qty"] * f / 2,
+                                  -pos["cost_basis_usd"] * f / 2)
+            return "filled"
+        self.patch(execution, "execute_sell", half)
+        p = self.position()
+        path = [(0, 100, 8, 3), (60, 130, 12, 4), (61, 131, 12, 4), (62, 130, 12, 4), (63, 131, 12, 4)]
+        self.drive(p, path, until_minute=66)
+        p = state.get_position(p["asset_id"])
+        below = {"price": 100.5, "fresh": True, "ts": 0, "buys_m5": 5, "sells_m5": 5}
+        ratchet.on_tick(p, below, T0 + 70 * 60)
+        self.assertEqual(ratchet.on_tick(p, below, T0 + 70 * 60 + 30), "floor")
+        st = ratchet.load(p["asset_id"])
+        self.assertFalse(st["done"])
+        self.assertAlmostEqual(st["budget_qty"], 7.5 - 3.75)      # 75% of 10 asked, 3.75 sold
+        self.assertEqual(journal.query("SELECT COUNT(*) n FROM ratchet_track")[0]["n"], 0)
+        p = state.get_position(p["asset_id"])
+        self.assertEqual(ratchet.on_tick(p, below, T0 + 71 * 60), "floor")   # the rest goes
+        self.assertEqual(len(self.sold), 2)

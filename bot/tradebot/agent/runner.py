@@ -262,7 +262,8 @@ def submit(cands):
     marks, fresh = marketdata.marks([p["asset_id"] for p in state.positions()])
     value = state.total_value(marks)
     n = 0
-    for c in cands[:MAX_CANDIDATES_PER_CYCLE]:
+    entries = 0     # new positions this cycle are capped; decisions on holdings never are
+    for c in cands:
         # The number decides, not the prose (operator amendment 2026-09-12).
         p30 = c.get("p30")
         is_perp = str(c.get("asset_id", "")).startswith("perp:")
@@ -331,6 +332,13 @@ def submit(cands):
             continue
         if action == "ADD" and not state.get_position(aid):
             continue  # an ADD with nothing to add to is a BUY, and needs approval
+        if action == "BUY_NOW" and entries >= MAX_CANDIDATES_PER_CYCLE:
+            # Slicing the whole list to six used to drop a SELL on a holding
+            # because six PASSes came first. Only new entries are budgeted.
+            journal.log_event("entry_cap", aid, {"cap": MAX_CANDIDATES_PER_CYCLE})
+            continue
+        if action == "BUY_NOW":
+            entries += 1
         size = risk.compute_size(value or 0)
         if size <= 0:
             journal.log_event("agent_skip_phase", aid, f"phase {state.phase()} sizes 0")

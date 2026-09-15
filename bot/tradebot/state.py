@@ -63,6 +63,7 @@ def _migrate():
                              ("forecast_tracking", "stop_ts", "REAL"),
                              ("forecast_tracking", "target_ts", "REAL"),
                              ("forecast_tracking", "end_6h", "REAL"),
+                             ("forecast_tracking", "end_ts", "REAL"),
                              ("outcomes", "sim_result", "TEXT"),
                              ("outcomes", "sim_return", "REAL")):
         cols = {r["name"] for r in journal.query(f"PRAGMA table_info({table})")}

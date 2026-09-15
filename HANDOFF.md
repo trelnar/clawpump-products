@@ -83,6 +83,17 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   before research so nothing ruggable costs a model call (`candidate_rug_filtered`
   events). Knobs: `RUG_MIN_LIQUIDITY_USD`, `RUG_MIN_PAIR_AGE_SEC`, `RUG_BLOCKED_DEXES`,
   `RUG_MAX_TOP10_SHARE`, `RUG_HOLDER_CHECK`. Base has no keyless holder index.
+- **External validation, 2026-09-15** (ten findings, all fixed, `tests/test_validation.py`):
+  a Base broadcast whose answer is lost returns the locally computed hash instead of
+  re-sending with a fresh nonce; a confirmed buy is never "not bought" (receipt read, then
+  an estimate under freeze, and a broadcast with unknown outcome is kept as an `unresolved`
+  order that reconciliation adopts when it lands); `execute_buy` re-checks STOP under the
+  order lock; the agent's six-per-cycle budget applies to new entries only, never to
+  decisions on holdings; a partial short cover keeps the rest on the books; an approved
+  short cannot open while shorts are off; the rug filter sums balances by wallet; a partial
+  ratchet fill keeps the rest of its budget; Hyperliquid size rounding is idempotent and the
+  max-hold exit stays reachable; the tracker ignores prints past the horizon and calls a
+  window with an unwatched ending "no result" rather than "flat".
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).

@@ -263,6 +263,15 @@ def _fire(p, st, q, trigger, entry, now):
         detail["result"] = result
         journal.log_event("ratchet_exit", asset, detail)
         if result in ("filled", "dust", "no_position"):
+            # What actually left, not what was asked: a partial fill keeps
+            # the rest of the budget for the next tick.
+            left = state.get_position(asset)
+            sold = qty - (left["qty"] if left else 0.0)
+            st["budget_qty"] = max(0.0, st["budget_qty"] - sold)
+            if left and st["budget_qty"] * price >= config.DUST_USD:
+                st["sold"].append({"trigger": trigger, "price": price, "ts": now,
+                                   "partial": round(sold, 6)})
+                return      # more to sell; not the whole counterfactual yet
             st["budget_qty"], st["done"] = 0.0, True
         else:
             return          # not sold: no counterfactual to score
