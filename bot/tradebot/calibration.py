@@ -6,6 +6,7 @@ COMING_UPs are where most of the signal is, and they cost nothing to observe.
 Prices are sampled forward rather than fetched historically, so this works for
 any asset the bot can already mark.
 """
+import json
 import threading
 import time
 
@@ -71,7 +72,7 @@ def tick():
         for u in updates:
             c.execute(
                 "UPDATE forecast_tracking SET max_price=?, min_price=?, max_6h=?, min_6h=?, "
-                "end_6h=?, end_ts=?, stop_ts=?, target_ts=?, last_ts=?, "
+                "end_6h=?, end_ts=?, stop_ts=?, target_ts=?, crosses=?, last_ts=?, "
                 "samples=COALESCE(samples,0)+1 WHERE forecast_id=? AND resolved=0", u)
         c.commit()
     for r in rows:
@@ -120,6 +121,38 @@ def _friction(asset_id):
     return config.SIM_FRICTION
 
 
+def _levels(asset_id):
+    """(stops, targets) the grid watches for this asset, as fractions."""
+    if (asset_id or "").startswith("perp:"):
+        return config.SIM_STOPS_PERP, config.SIM_TARGETS_PERP
+    return config.SIM_STOPS, config.SIM_TARGETS
+
+
+def _lkey(kind, level):
+    return f"{kind}{int(round(level * 100))}"
+
+
+def _crosses(r, px, now, short):
+    """First print past each grid level, inside the thesis window."""
+    start = r["start_price"] or 0
+    try:
+        c = json.loads(r.get("crosses") or "{}")
+    except (TypeError, ValueError):
+        c = {}
+    if start <= 0:
+        return c
+    stops, targets = _levels(r["asset_id"])
+    for lv in stops:
+        k = _lkey("s", lv)
+        if k not in c and (px >= start * (1 + lv) if short else px <= start * (1 - lv)):
+            c[k] = now
+    for lv in targets:
+        k = _lkey("t", lv)
+        if k not in c and (px <= start * (1 - lv) if short else px >= start * (1 + lv)):
+            c[k] = now
+    return c
+
+
 def _advance(r, px, now):
     """One sample against one open forecast: extremes over the whole horizon,
     extremes and the last print inside the thesis window, and the FIRST time
@@ -137,6 +170,7 @@ def _advance(r, px, now):
     max6, min6, end6 = r.get("max_6h"), r.get("min_6h"), r.get("end_6h")
     end_ts = r.get("end_ts")
     stop_ts, target_ts = r.get("stop_ts"), r.get("target_ts")
+    crosses = r.get("crosses")
     if in_win:
         max6 = max(max6 or 0, px)
         min6 = min(min6 or start, px)
@@ -149,7 +183,9 @@ def _advance(r, px, now):
                 stop_ts = now
             if hit_target and target_ts is None:
                 target_ts = now
-    return (max_p, min_p, max6, min6, end6, end_ts, stop_ts, target_ts, now, r["forecast_id"])
+        crosses = json.dumps(_crosses(r, px, now, short))
+    return (max_p, min_p, max6, min6, end6, end_ts, stop_ts, target_ts, crosses, now,
+            r["forecast_id"])
 
 
 def _sim(r):
@@ -160,11 +196,19 @@ def _sim(r):
     never observed inside its window (the rows in flight when these columns
     arrived): scoring those as 'flat' would have fed the model several
     hundred phantom losers."""
-    start = r["start_price"] or 0
     target, stop, short = _thresholds(r["asset_id"])
     st, tt, end = r.get("stop_ts"), r.get("target_ts"), r.get("end_6h")
     if st is None and tt is None and end is None:
         return None, None
+    return _play(r, stop, target, st, tt, short)
+
+
+def _play(r, stop, target, st, tt, short):
+    """One trade at one (stop, target) pair given the first prints past each.
+    Returns (result, net return) or (None, None) when the end of the window
+    was not watched and neither level printed."""
+    start = r["start_price"] or 0
+    end = r.get("end_6h")
     fee = _friction(r["asset_id"])
     if st and (not tt or st <= tt):
         return "stop", -stop - fee
@@ -181,6 +225,25 @@ def _sim(r):
         ret = end / start - 1
         return "flat", (-ret if short else ret) - fee
     return "flat", -fee
+
+
+def _grid(r):
+    """Every stop/target pair the tracker watched, played on this forecast.
+    {'10/15': [result, net return], ...}; pairs with no result are absent.
+    None when the row was never observed by the grid-aware tracker."""
+    try:
+        c = json.loads(r.get("crosses") or "")
+    except (TypeError, ValueError):
+        return None
+    short = (r["asset_id"] or "").startswith("perp:")
+    stops, targets = _levels(r["asset_id"])
+    out = {}
+    for s_ in stops:
+        for t_ in targets:
+            res, ret = _play(r, s_, t_, c.get(_lkey("s", s_)), c.get(_lkey("t", t_)), short)
+            if res is not None:
+                out[f"{int(round(s_ * 100))}/{int(round(t_ * 100))}"] = [res, round(ret, 4)]
+    return out
 
 
 def _resolve(forecast_id):
@@ -209,6 +272,7 @@ def _resolve(forecast_id):
     else:
         hit30 = int(bool(m6 and m6 >= 1 + config.P30_TARGET))
     sim_result, sim_ret = _sim(r)
+    grid = _grid(r)
     journal.log_outcome(forecast_id=forecast_id, max_multiple=mult,
                         hit_30=hit30,
                         hit_2x=int(bool(mult and mult >= 2)),
@@ -218,7 +282,8 @@ def _resolve(forecast_id):
                         exit_result=r["action"], realized_pnl_usd=None,
                         slippage_vs_plan=None,
                         sim_result=sim_result,
-                        sim_return=None if sim_ret is None else round(sim_ret, 4))
+                        sim_return=None if sim_ret is None else round(sim_ret, 4),
+                        sim_grid=json.dumps(grid) if grid else None)
     with journal._lock:
         journal.conn().execute(
             "UPDATE forecast_tracking SET resolved=1 WHERE forecast_id=?", (forecast_id,))
@@ -308,7 +373,60 @@ def scorecard(days=30):
             out.append(f"  p30~{b['b']:.1f} n={b['n']}: won {100*(b['won'] or 0)/n:.0f}%, "
                        f"stopped {100*(b['stopped'] or 0)/n:.0f}% -> "
                        f"${10*(b['sim_ret'] or 0):+.2f} per $10")
+    out += grid_lines(since)
     return "\n".join(out)
+
+
+def grid_lines(since):
+    """Which stop/target pair would have made money on what the model saw.
+    Three grids: every token call, the model's better token calls, perps."""
+    rows = journal.query(
+        "SELECT o.sim_grid g, f.p30 p30, t.asset_id a FROM outcomes o "
+        "JOIN forecast_tracking t ON t.forecast_id=o.forecast_id "
+        "JOIN forecasts f ON f.forecast_id=o.forecast_id "
+        "WHERE o.ts > ? AND o.sim_grid IS NOT NULL", (since,))
+    tokens = [r for r in rows if not (r["a"] or "").startswith("perp:")]
+    good = [r for r in tokens if (r["p30"] or 0) >= config.SIM_GRID_P30_MIN]
+    perps = [r for r in rows if (r["a"] or "").startswith("perp:")]
+    out = []
+    for title, sel, stops, targets in (
+            ("every token call", tokens, config.SIM_STOPS, config.SIM_TARGETS),
+            (f"token calls with p30 >= {config.SIM_GRID_P30_MIN:.2f}", good,
+             config.SIM_STOPS, config.SIM_TARGETS),
+            ("perp calls (short)", perps, config.SIM_STOPS_PERP, config.SIM_TARGETS_PERP)):
+        if not sel:
+            continue
+        cells = _grid_cells(sel)
+        if not cells:
+            continue
+        ns = [n for _m, n in cells.values()]
+        out.append(f"$ per $10 by stop/target, {title} (n={min(ns)}-{max(ns)}):")
+        out.append("  stop  " + "".join(f"{'+' + str(int(round(t * 100))) + '%':>8s}" for t in targets))
+        for s_ in stops:
+            line = f"  -{int(round(s_ * 100)):>2d}% "
+            for t_ in targets:
+                m = cells.get(f"{int(round(s_ * 100))}/{int(round(t_ * 100))}")
+                line += f"{('$%+.2f' % (10 * m[0])) if m else '    -':>8s}"
+            out.append(line)
+    return out
+
+
+def _grid_cells(rows):
+    """{cell: (mean net return, n)} over the rows' stored grids."""
+    acc = {}
+    for r in rows:
+        try:
+            g = json.loads(r["g"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        for k, v in g.items():
+            try:
+                ret = float(v[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            tot, n = acc.get(k, (0.0, 0))
+            acc[k] = (tot + ret, n + 1)
+    return {k: (tot / n, n) for k, (tot, n) in acc.items() if n}
 
 
 # Perps are scored on a short thesis, tokens on a long one; one PASS bucket

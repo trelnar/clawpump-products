@@ -94,6 +94,15 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   ratchet fill keeps the rest of its budget; Hyperliquid size rounding is idempotent and the
   max-hold exit stays reachable; the tracker ignores prints past the horizon and calls a
   window with an unwatched ending "no result" rather than "flat".
+- **Stop/target grid** (operator "go", 2026-09-15). The first day of clean simulation said
+  the +30%/−15% long thesis loses on what the model sees (62% stopped first, −$0.74 per $10)
+  while the short leg is marginally positive. The tracker now records the first print past
+  each of `SIM_STOPS` × `SIM_TARGETS` (tokens) and `SIM_STOPS_PERP` × `SIM_TARGETS_PERP`
+  (perps) inside the 6h window (`forecast_tracking.crosses`), plays every pair at
+  resolution (`outcomes.sim_grid`), and `SCORE` prints three grids of mean $ per $10: every
+  token call, token calls with p30 ≥ `SIM_GRID_P30_MIN`, and perp calls. A positive cell is
+  a setting worth trading; no positive cell means the thesis is wrong for these tokens at
+  any setting. Same caveat as the rest of the sim: stops are assumed to fill.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).

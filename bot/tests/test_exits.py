@@ -591,6 +591,43 @@ class SimOutcome(Base):
         self.assertEqual(o["hit_2x"], 0)
         self.assertAlmostEqual(o["max_multiple"], 1.0)
 
+    def test_the_grid_plays_every_stop_target_pair_on_the_same_prints(self):
+        self.patch(calibration.config, "SIM_STOPS", [0.10, 0.15, 0.20, 0.25])
+        self.patch(calibration.config, "SIM_TARGETS", [0.15, 0.20, 0.30, 0.50])
+        # -12%, then +16%, then +31%: -10% stops out before +15%; -15% never prints
+        o = self._run("solana:GRID", 1.0, [0.88, 1.16, 1.31])
+        g = json.loads(o["sim_grid"])
+        self.assertEqual(g["10/15"][0], "stop")
+        self.assertAlmostEqual(g["10/15"][1], -0.14)          # -10% and the 4% round trip
+        self.assertEqual(g["15/15"][0], "target")
+        self.assertAlmostEqual(g["15/15"][1], 0.11)
+        self.assertEqual(g["15/30"][0], "target")
+        self.assertAlmostEqual(g["15/30"][1], 0.26)
+        self.assertEqual(g["25/50"][0], "flat")                # neither: the window's last print
+        self.assertAlmostEqual(g["25/50"][1], 0.27)
+        txt = calibration.scorecard(1)
+        self.assertIn("$ per $10 by stop/target, every token call (n=1-1):", txt)
+        self.assertIn("token calls with p30 >= 0.25", txt)
+        row15 = [ln for ln in txt.splitlines() if ln.startswith("  -15% ")][0]
+        self.assertIn("$+1.10", row15)                          # 15/15
+        self.assertIn("$+2.60", row15)                          # 15/30
+
+    def test_the_perp_grid_is_mirrored_and_kept_apart(self):
+        self.patch(calibration.config, "HL_TARGET", 0.08)
+        self.patch(calibration.config, "HL_STOP_PCT", 0.04)
+        self.patch(calibration.config, "HL_FEE_RATE", 0.00045)
+        self.patch(calibration.config, "SIM_STOPS_PERP", [0.02, 0.04, 0.06, 0.08])
+        self.patch(calibration.config, "SIM_TARGETS_PERP", [0.04, 0.06, 0.08, 0.12])
+        o = self._run("perp:PGRID", 100.0, [105.0, 91.0], action="SHORT_NOW")
+        g = json.loads(o["sim_grid"])
+        self.assertEqual(g["4/8"][0], "stop")                  # +5% printed before -9%
+        self.assertAlmostEqual(g["4/8"][1], -0.0409)
+        self.assertEqual(g["6/8"][0], "target")
+        self.assertAlmostEqual(g["6/8"][1], 0.0791)
+        txt = calibration.scorecard(1)
+        self.assertIn("perp calls (short) (n=1-1):", txt)
+        self.assertNotIn("every token call", txt)
+
     def test_a_short_thesis_is_mirrored(self):
         self.patch(calibration.config, "HL_TARGET", 0.08)
         self.patch(calibration.config, "HL_STOP_PCT", 0.04)

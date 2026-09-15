@@ -247,6 +247,15 @@ TRACK_WINDOW_SEC = int(env("TRACK_WINDOW_SEC", str(12 * 3600)))
 TRACK_BATCH = 150                # distinct ASSETS marked per pass, youngest forecasts first
 TRACK_INTERVAL_SEC = 300         # tracker runs off the main loop (2026-09-13); 5-min samples
 SIM_FRICTION = float(env("SIM_FRICTION", "0.04"))   # round-trip cost assumed by SCORE's sim P&L
+# The stop/target grid (operator "go", 2026-09-15): the tracker records the
+# first print past each of these levels, so SCORE can show what every
+# stop/target pair would have made on the same forecasts. Fractions.
+_lv = lambda name, default: [float(x) for x in env(name, default).split(",") if x.strip()]  # noqa: E731
+SIM_STOPS = _lv("SIM_STOPS", "0.10,0.15,0.20,0.25")
+SIM_TARGETS = _lv("SIM_TARGETS", "0.15,0.20,0.30,0.50")
+SIM_STOPS_PERP = _lv("SIM_STOPS_PERP", "0.02,0.04,0.06,0.08")     # against a short: price UP
+SIM_TARGETS_PERP = _lv("SIM_TARGETS_PERP", "0.04,0.06,0.08,0.12") # for a short: price DOWN
+SIM_GRID_P30_MIN = float(env("SIM_GRID_P30_MIN", "0.25"))        # second grid: the model's better calls
 PNL_LAST_EXITS = 8               # per-trade lines at the bottom of PNL
 RECON_POSITIONS_SEC = 1800       # position-vs-venue reconciliation
 POSITION_DRIFT_PCT = 0.02        # book vs venue mismatch worth alerting on
