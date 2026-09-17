@@ -118,6 +118,13 @@ Repo: `trelnar/clawpump-products`, branch `claude/trading-bot-skills-sfqmfo`.
   lock; an unwatched window is no evidence of a miss; a grid level removed and restored keeps
   being watched. Remaining known limits: SCORE's stop is idealised, and holder coverage on
   RPCs without a census is a documented heuristic with refusals, not a proof.
+- **Universe 2** (operator "2", 2026-09-17). Two days of the grid (200 token calls, 130
+  perp calls) found no stop/target pair that makes money on pump-stage tokens, and the model's
+  stated p30 carried no signal. Same simulator, different universe: `RUG_MIN_LIQUIDITY_USD`
+  250k and `RUG_MIN_PAIR_AGE_SEC` 24h, research hourly (`DISCOVERY_INTERVAL_SEC` 3600,
+  `AGENT_STALE_SEC` derived). The agent's env now carries the RUG/SIM/BUY/P30 families so the
+  research-side prefilter sees the same universe as the buy gate. The first `SCORE 1` after
+  the deploy mixes both universes; the second is clean.
 - **Hard limits** (`risk-limits`): 5% max position, 20%/24h rolling-peak drawdown halts buying.
   *C1 defeated these; fixed in the repo, not yet on the VPS.*
 - **Cost**: ~$2/day of Claude API. Prompt caching confirmed working (10,062 tokens/cycle cached).

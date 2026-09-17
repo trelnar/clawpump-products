@@ -213,7 +213,7 @@ class HolderBound(Base):
         self.assertAlmostEqual(share, 0.509)          # the developer plus nine 0.1% wallets
 
     def test_unknown_pool_age_is_a_refusal(self):
-        ok, why, _ = rugcheck.check_pair({"liquidity_usd": 50000, "dex": "uniswap"})
+        ok, why, _ = rugcheck.check_pair({"liquidity_usd": 5e6, "dex": "uniswap"})
         self.assertFalse(ok)
         self.assertEqual(why, "I can't tell how old the pool is")
 

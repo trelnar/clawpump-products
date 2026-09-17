@@ -272,7 +272,7 @@ class Discovery(Base):
         store.record("reddit", a, "post", ref="r")
         self.patch(signals, "collect_all", lambda: {})
         self.patch(runner.marketdata, "dexscreener_token", lambda c, ad: {
-            "price": 1.0, "liquidity_usd": 60000.0, "volume_h24": 1e5, "base_symbol": "T",
+            "price": 1.0, "liquidity_usd": 600000.0, "volume_h24": 1e5, "base_symbol": "T",
             "created_ms": 0, "pair_address": "P"})
         self.patch(runner.marketdata, "ohlcv_dex", lambda *a, **k: [])
         self.patch(runner.marketdata, "coinbase_movers", lambda: [])

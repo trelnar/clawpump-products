@@ -79,7 +79,7 @@ def holding_text():
         for leg in legs:
             if isinstance(leg, dict) and leg.get("multiple") and leg.get("sell_fraction"):
                 exits.append(f"plan: sell {leg['sell_fraction']:.0%} at {leg['multiple']}x")
-        exits.append("model reviews every 30 min")
+        exits.append(f"model reviews every {config.DISCOVERY_INTERVAL_SEC // 60} min")
         lines.append("  Exits: " + "; ".join(exits))
     return "\n".join(lines)
 

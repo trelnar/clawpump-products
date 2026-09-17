@@ -834,7 +834,8 @@ def execute_buy(ticket, ref_price):
     journal.log_fill(client_oid=oid, asset_id=asset, side="buy", qty=qty,
                      price=eff or fill_price, fee_usd=fee, venue=venue or chain, tx_ref=oid)
     alerts.bought(asset, spent, fill_price, inv,
-                  "I bank 75% once +20% holds; the rest rides. Reviewed every 30 min.")
+                  "I bank 75% once +20% holds; the rest rides. Reviewed every "
+                  f"{config.DISCOVERY_INTERVAL_SEC // 60} min.")
     return "filled"
 
 

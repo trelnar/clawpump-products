@@ -26,7 +26,7 @@ ANTHROPIC_MODEL = env("ANTHROPIC_MODEL", "claude-opus-5")
 # Leave unset for a Workspace-type key.
 ANTHROPIC_WORKSPACE_ID = env("ANTHROPIC_WORKSPACE_ID")
 # Cost controls (agent layer). Editable via secrets.env without a code change.
-DISCOVERY_INTERVAL_SEC = int(env("DISCOVERY_INTERVAL_SEC", "1800"))  # 30 min: API bill was the larger half of the loss
+DISCOVERY_INTERVAL_SEC = int(env("DISCOVERY_INTERVAL_SEC", "3600"))  # hourly (2026-09-17): the sim, not the trades, is what runs
 AGENT_EFFORT = env("AGENT_EFFORT", "low")          # low effort suits routine scanning
 AGENT_MAX_TOKENS = int(env("AGENT_MAX_TOKENS", "8000"))
 AGENT_MAX_CANDIDATES = int(env("AGENT_MAX_CANDIDATES", "10"))  # payload cap per cycle
@@ -219,8 +219,11 @@ ENTRY_M5_MAX_PCT = float(env("ENTRY_M5_MAX_PCT", "30"))   # skip while the 5-min
 # -15% stop cannot fire through a pulled pool. These are the conditions under
 # which a token is worth a $10 position at all. Applied before research (so no
 # API spend on the ruggable) and again at the buy gate (with the holder read).
-RUG_MIN_LIQUIDITY_USD = float(env("RUG_MIN_LIQUIDITY_USD", "30000"))
-RUG_MIN_PAIR_AGE_SEC = int(env("RUG_MIN_PAIR_AGE_SEC", "3600"))
+# Universe 2 (operator "2", 2026-09-17): two days of the grid said no stop or
+# target makes money on pump-stage tokens. Same simulator, established
+# tokens only: a quarter million of liquidity and a day of life.
+RUG_MIN_LIQUIDITY_USD = float(env("RUG_MIN_LIQUIDITY_USD", "250000"))
+RUG_MIN_PAIR_AGE_SEC = int(env("RUG_MIN_PAIR_AGE_SEC", str(24 * 3600)))
 RUG_BLOCKED_DEXES = [x.strip().lower() for x in env(
     "RUG_BLOCKED_DEXES", "pumpfun,moonshot").split(",") if x.strip()]   # bonding curves
 RUG_MAX_TOP10_SHARE = float(env("RUG_MAX_TOP10_SHARE", "0.40"))    # of supply, pool excluded
@@ -243,7 +246,7 @@ SETTLE_READ_TRIES = 5            # balance re-reads after a confirmed swap
 SETTLE_READ_SLEEP_SEC = 3
 TELEGRAM_STALE_SEC = 300         # no successful poll for this long -> SELL_ONLY
 TELEGRAM_WATCHDOG_SEC = 30       # how often the core checks the poller
-AGENT_STALE_SEC = 4500           # no completed research cycle -> alert (2.5 cycles at 30 min)
+AGENT_STALE_SEC = int(env("AGENT_STALE_SEC", str(int(DISCOVERY_INTERVAL_SEC * 2.5))))  # no research cycle -> alert
 AGENT_WATCHDOG_SEC = 300
 # Forecast resolution horizon. 72h under the 2x thesis; the thesis is now 6h,
 # and SCORE waiting three days for its first row meant three days of flying
