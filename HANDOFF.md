@@ -1,5 +1,25 @@
 # HypeBot — Handoff
 
+**Status as of 2026-09-20: WINDING DOWN. No strategy on either project has a measured edge.**
+
+- **Project B (this bot).** Research (`tradebot-agent`) is disabled. Its own scorecard
+  measured the pump-long and perp-short universes as edgeless (~300 and ~400 samples) and the
+  established-token universe as starved. `tradebot-core` is still running only to manage the
+  one open ARB short to its exit; stop it after that (§4) and withdraw the Hyperliquid balance.
+- **Project A (the BTC 4h "dots" system, branch `claude/hype-token-signals-4b6nld`).** The
+  indicator ports were verified against the live chart and the published Pine on 2026-09-20
+  (U-0, U-1, U-3 all pass). The 3,360-cell ablation on 2023–2026 history for BTC, ETH, SOL,
+  AVAX, LINK and DOGE found no arm that separates from baseline on any coin; the dot alone
+  loses with confidence on four of six, and on three coins the random-entry control beats
+  every real arm. Reports: `~/backtest-work/report_*.md` on the VPS.
+- **Project C (A's signals through B's execution) is therefore not being built.**
+- **Standing rule:** no bot runs on money until the harness has passed it on real history with
+  a random-entry control and a confidence interval clear of zero.
+
+The execution stack (§2–§4) is sound and audited; it is the strategy that is missing.
+
+*Superseded status lines:*
+
 **Status as of 2026-09-02: LIVE in NORMAL, ~$880 of real money, zero positions, zero trades ever.**
 A second audit (`AUDIT-FIRSTFILL.md`, 13 agents over the newly written code) found 10 more
 defects on the trade path, 2 critical. All 10 are fixed in the repo. **STOP the bot and deploy
