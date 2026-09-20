@@ -10,14 +10,19 @@ one bar early or late silently rewrites every delta_pct downstream of it.
 
 See SPEC.md sections 2.2, 2.3 and 3.4. This module implements 3.4 exactly.
 
+RESOLVED AGAINST THE PUBLISHED PINE SOURCE (2026-09-20):
+  * The VIDYA line is ta.sma(vidya_value, 15) -- the recursion is SMA-smoothed
+    before the bands are built (`smooth_length`, default 15).
+  * The trend flips on ta.crossover(source, upper_band) / ta.crossunder(source,
+    lower_band): the BAND rule (U-3). `trend_rule="line"` remains as an ablation.
+  * The volume counters are zeroed on the flip bar AND the bar after it (the Pine
+    resets on ta.change() of a one-bar-wide cross flag); accumulation starts on the
+    second bar after a flip.
+  * The delta label is drawn only on the last bar, so any value read off a live
+    chart includes the in-progress bar's partial volume. Chart readings are a
+    sign-and-magnitude check, never an exact one.
+
 OPEN QUESTIONS:
-  U-3 (P1, high leverage) -- trend flip rule. Default `trend_rule="band"`: the trend
-      flips when close closes beyond the ATR band (upper/lower). The alternative,
-      `trend_rule="line"`, flips on close vs the VIDYA line itself. SPEC.md 2.2
-      resolves this to "band" because band_mult=2 and atr_length=200 are otherwise
-      unused parameters. This choice shifts every leg_id and therefore every
-      delta_pct, so it must be checked against the chart. See the VERIFY note on
-      `trend_state`.
 
   Leg 0 delta masking -- SPEC.md 2.3 gives an accumulation formula that starts at
       bar 0, while SPEC.md 3.4 states "delta_pct is NaN until the first band break".
@@ -88,8 +93,11 @@ class VidyaParams:
         atr_length: Wilder ATR length for the bands. 200 on the user's chart, which
             is why a run needs >= 700 bars of history.
         source: Price source. "close" on the user's chart.
-        trend_rule: "band" (close beyond the ATR band) or "line" (close vs the VIDYA
-            line). DISPUTED -- see U-3 in SPEC.md 4.
+        smooth_length: SMA applied to the recursive VIDYA value before it is used
+            for the bands. The published Pine returns ``ta.sma(vidya_value, 15)``;
+            1 disables it.
+        trend_rule: "band" (close crossing the ATR band, per the Pine source) or
+            "line" (close vs the VIDYA line; kept only as an ablation).
     """
 
     vidya_length: int = 34
@@ -97,7 +105,8 @@ class VidyaParams:
     band_mult: float = 2.0
     atr_length: int = 200
     source: str = "close"
-    trend_rule: str = "band"  # "band" | "line" -- DISPUTED, see U-3
+    smooth_length: int = 15  # Pine: ta.sma(vidya_value, 15)
+    trend_rule: str = "band"  # "band" per the Pine source (U-3 resolved 2026-09-20)
 
 
 # --------------------------------------------------------------------------------
@@ -298,23 +307,37 @@ def cmo_abs(src: pd.Series, momentum_length: int = 20) -> pd.Series:
 
 
 def vidya_line(
-    src: pd.Series, vidya_length: int = 34, momentum_length: int = 20
+    src: pd.Series,
+    vidya_length: int = 34,
+    momentum_length: int = 20,
+    smooth_length: int = 15,
 ) -> pd.Series:
-    """CMO-weighted Variable Index Dynamic Average.
+    """CMO-weighted Variable Index Dynamic Average, SMA-smoothed as in the Pine.
 
-    Pine origin (BigBeluga Volumatic VIDYA, `vidya_calc`)::
+    Pine origin (BigBeluga Volumatic VIDYA, `vidya_calc`, read from the published
+    source on 2026-09-20)::
 
         alpha = 2 / (length + 1)
-        vidya := src*alpha*cmo + nz(vidya[1])*(1 - alpha*cmo)
+        var float vidya_value = 0.0
+        vidya_value := alpha*cmo*src + (1 - alpha*cmo) * nz(vidya_value[1])
+        ta.sma(vidya_value, 15)
 
-    Seeded at the first bar where the CMO is finite with ``vidya[i0] = src[i0]``.
-    A NaN weight after the seed holds the previous value.
+    The recursion is seeded here at the first bar where the CMO is finite with
+    ``vidya[i0] = src[i0]`` rather than Pine's 0.0: on a chart with years of
+    history Pine's zero seed has decayed to nothing, and seeding at the price is
+    the closest a shorter window can get to that converged state. A NaN weight
+    after the seed holds the previous value. The returned line is the
+    ``smooth_length``-bar SMA of the recursion (``smooth_length=1`` returns the
+    raw recursion).
 
     Returns:
-        float64 Series, same index/length as ``src``, NaN before the seed bar.
+        float64 Series, same index/length as ``src``, NaN before the seed bar
+        and for ``smooth_length - 1`` bars after it.
     """
     if vidya_length < 1:
         raise ValueError("vidya_length must be >= 1")
+    if smooth_length < 1:
+        raise ValueError("smooth_length must be >= 1")
     cmo = cmo_abs(src, momentum_length)
     alpha = 2.0 / (float(vidya_length) + 1.0)  # Pine: 2/(length+1), = 2/35 at 34
     k = (alpha * cmo).to_numpy(dtype="float64")
@@ -334,7 +357,10 @@ def vidya_line(
             prev = ki * si + (1.0 - ki) * prev
         # else: hold previous state
         out[i] = prev
-    return pd.Series(out, index=src.index, dtype="float64")
+    raw = pd.Series(out, index=src.index, dtype="float64")
+    if smooth_length == 1:
+        return raw
+    return raw.rolling(smooth_length, min_periods=smooth_length).mean().astype("float64")
 
 
 def trend_state(
@@ -443,7 +469,9 @@ def compute(bars: pd.DataFrame, params: VidyaParams = VidyaParams()) -> pd.DataF
     volume = bars["volume"].astype("float64")
 
     # --- line and bands -------------------------------------------------------
-    vidya = vidya_line(src, params.vidya_length, params.momentum_length)
+    vidya = vidya_line(
+        src, params.vidya_length, params.momentum_length, params.smooth_length
+    )
     atr = wilder_atr(high, low, close, params.atr_length)
     upper = vidya + float(params.band_mult) * atr
     lower = vidya - float(params.band_mult) * atr
@@ -458,8 +486,19 @@ def compute(bars: pd.DataFrame, params: VidyaParams = VidyaParams()) -> pd.DataF
 
     # --- cumulative Delta Volume, reset on every flip -------------------------
     # Whole-bar classification by close vs open. close == open contributes to neither.
-    buy_contrib = volume.where(close > open_, 0.0)
-    sell_contrib = volume.where(close < open_, 0.0)
+    #
+    # Pine (published source, 2026-09-20):
+    #     if ta.change(trend_cross_up) or ta.change(trend_cross_down)
+    #         up_trend_volume := 0 ; down_trend_volume := 0
+    #     if not (...)
+    #         up_trend_volume += close > open ? volume : 0   (etc.)
+    # trend_cross_up is true ONLY on the flip bar, so ta.change() of it is true on
+    # the flip bar (false->true) AND on the bar after (true->false). The counters
+    # are therefore zeroed on both, and accumulation starts on the SECOND bar
+    # after a flip. Neither the flip bar's nor the next bar's volume is counted.
+    skip = trend_flip | trend_flip.shift(1, fill_value=False)
+    buy_contrib = volume.where((close > open_) & ~skip, 0.0)
+    sell_contrib = volume.where((close < open_) & ~skip, 0.0)
     # cumsum WITHIN leg_id == "accumulate since the last flip, reset on flip".
     # Causal: leg_id is causal and a within-group cumsum only ever reads the prefix.
     buy_vol = buy_contrib.groupby(leg_id, sort=False).cumsum().astype("float64")
@@ -470,6 +509,8 @@ def compute(bars: pd.DataFrame, params: VidyaParams = VidyaParams()) -> pd.DataF
         # Confirmed against four of the user's screenshots:
         #   Delta% = 2 * (buy - sell) / (buy + sell) * 100
         delta_pct = 2.0 * (buy_vol - sell_vol) / denom * 100.0
+    # Pine prints '0%' where the counters are both zero (the two skipped bars at
+    # the head of every leg); NaN here fails every threshold gate the same way.
     delta_pct = delta_pct.where(denom > 0.0, np.nan).astype("float64")
     # SPEC.md 3.4 warmup clause: no leg has begun before the first flip.
     delta_pct = delta_pct.where(leg_id > 0, np.nan)

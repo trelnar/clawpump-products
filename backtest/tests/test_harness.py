@@ -376,6 +376,39 @@ def test_delta_threshold_semantics_are_documented() -> None:
     assert buy_share_for(200.0) == pytest.approx(100.0)
 
 
+def test_vidya_line_is_the_15_bar_sma_of_the_recursion(bars: pd.DataFrame) -> None:
+    """Pine: vidya_calc returns ta.sma(vidya_value, 15). Read from the published source."""
+    close = bars["close"].astype(float)
+    raw = vidya.vidya_line(close, 34, 20, smooth_length=1)
+    smoothed = vidya.vidya_line(close, 34, 20, smooth_length=15)
+    expect = raw.rolling(15, min_periods=15).mean()
+    ok = expect.notna()
+    assert ok.sum() > 1000
+    assert np.allclose(smoothed[ok], expect[ok], rtol=0, atol=1e-9)
+    assert vidya.VidyaParams().smooth_length == 15
+
+
+def test_delta_volume_skips_the_flip_bar_and_the_one_after(vd: pd.DataFrame, bars: pd.DataFrame) -> None:
+    """Pine resets the counters on ta.change() of a one-bar cross flag, which is
+    true on the flip bar and again on the next bar. Accumulation starts on the
+    second bar after a flip, with that bar's own volume only."""
+    flips = np.flatnonzero(vd["trend_flip"].to_numpy(dtype=bool))
+    flips = [i for i in flips if i + 2 < len(vd)]
+    assert len(flips) >= 2
+    tot = (vd["buy_vol"] + vd["sell_vol"]).to_numpy()
+    vol = bars["volume"].to_numpy(dtype=float)
+    o = bars["open"].to_numpy(dtype=float)
+    c = bars["close"].to_numpy(dtype=float)
+    checked = 0
+    for i in flips:
+        assert tot[i] == 0.0 and tot[i + 1] == 0.0, f"flip at {i} counted a skipped bar"
+        if not vd["trend_flip"].iloc[i + 1] and not vd["trend_flip"].iloc[i + 2]:
+            expect = vol[i + 2] if c[i + 2] != o[i + 2] else 0.0
+            assert abs(tot[i + 2] - expect) < 1e-9, (i, tot[i + 2], expect)
+            checked += 1
+    assert checked >= 1
+
+
 def test_delta_accumulators_reset_at_each_flip(vd: pd.DataFrame) -> None:
     """Buy/sell volume accumulates *per leg*; it must not carry across a flip."""
     legs = vd["leg_id"].dropna().unique()

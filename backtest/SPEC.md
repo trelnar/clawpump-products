@@ -94,6 +94,7 @@ Parameters from the user's chart: **34 / 20 / 2 / close**.
 | `band_mult` | 2.0 |
 | `source` | `close` |
 | `atr_length` | **200** |
+| `smooth_length` | **15** (fixed in the Pine: `ta.sma(vidya_value, 15)`) |
 
 The ATR(200) dependency is why a run needs far more history than 300 bars. See §3.7 warmup.
 
@@ -107,9 +108,10 @@ sum_dn[i] = sum(dn[i-19 .. i])
 cmo[i]    = abs((sum_up[i] - sum_dn[i]) / (sum_up[i] + sum_dn[i]))    # 0 if denom == 0
 alpha     = 2 / (vidya_length + 1)                                     # = 2/35
 k[i]      = alpha * cmo[i]
-vidya[i]  = k[i]*src[i] + (1 - k[i])*vidya[i-1]
+raw[i]    = k[i]*src[i] + (1 - k[i])*raw[i-1]
+vidya[i]  = mean(raw[i-14 .. i])                                       # Pine: ta.sma(vidya_value, 15)
 ```
-Seed `vidya[i0] = src[i0]` at the first bar where `cmo` is finite.
+Seed `raw[i0] = src[i0]` at the first bar where `cmo` is finite (Pine seeds at 0 via `nz`; on a chart with years of history that transient is long gone, and seeding at price is the closest a shorter window gets to the converged state). The 15-bar SMA was read from the published Pine source on 2026-09-20; it is not an input.
 
 **Bands:**
 ```
@@ -119,7 +121,7 @@ lower[i] = vidya[i] - band_mult * atr[i]
 ```
 ATR is **Wilder's** (RMA smoothing, `alpha = 1/200`), matching Pine `ta.atr`. Not a simple mean of true range.
 
-**Trend state and flip (DISPUTED — see U-3):**
+**Trend state and flip (RESOLVED 2026-09-20 from the Pine source: `ta.crossover(source, upper_band)` / `ta.crossunder(source, lower_band)`, i.e. the band rule):**
 ```
 trend[i] = +1  if close[i] > upper[i]
          = -1  if close[i] < lower[i]
@@ -128,7 +130,7 @@ trend_flip[i] = trend[i] != trend[i-1]
 ```
 Initial `trend` before the first band break is `0` (undefined); no gate may pass while `trend == 0`.
 
-**Resolution:** the specs disagree on whether the flip is a band break (above) or a simple `close` vs `vidya`-line cross. **Default = band break**, because the band multiplier `2` and the ATR(200) parameter are otherwise unused and BigBeluga's "Volumatic" naming refers to the band envelope. **Marked as needing chart verification (U-3).** Implement the alternative as `trend_rule="line"` so it is one flag away.
+**Resolution:** band break, per the published source. `trend_rule="line"` is retained only as an ablation.
 
 ### 2.3 Delta Volume — cumulative, per trend leg
 
@@ -139,7 +141,7 @@ delta_pct = 2 * (buy - sell) / (buy + sell) * 100
 
 **CRITICAL SEMANTICS — this is where a previous session went wrong and produced a meaningless −69%:**
 
-- Buy/sell volume **accumulates across the entire trend leg since the last VIDYA flip**. It resets to zero on every `trend_flip`.
+- Buy/sell volume **accumulates across the trend leg**. The Pine resets the counters on `ta.change()` of a one-bar-wide cross flag, which is true on the flip bar **and on the bar after it**, so both are zeroed and **accumulation starts on the second bar after a flip** (read from the published source, 2026-09-20).
 - Whole 4h bars are classified by **close vs open**:
   - `close > open` → the bar's **entire** volume counts as buy
   - `close < open` → the bar's **entire** volume counts as sell
@@ -148,11 +150,12 @@ delta_pct = 2 * (buy - sell) / (buy + sell) * 100
 
 ```
 leg_id[i]   = leg_id[i-1] + 1 if trend_flip[i] else leg_id[i-1]     # starts at 0
-buy_vol[i]  = (buy_vol[i-1]  if not trend_flip[i] else 0) + (volume[i] if close[i] >  open[i] else 0)
-sell_vol[i] = (sell_vol[i-1] if not trend_flip[i] else 0) + (volume[i] if close[i] <  open[i] else 0)
+skip[i]     = trend_flip[i] or trend_flip[i-1]                       # Pine: ta.change() of the cross flag
+buy_vol[i]  = 0 if skip[i] else buy_vol[i-1]  + (volume[i] if close[i] >  open[i] else 0)
+sell_vol[i] = 0 if skip[i] else sell_vol[i-1] + (volume[i] if close[i] <  open[i] else 0)
 delta_pct[i]= 2*(buy_vol[i] - sell_vol[i]) / (buy_vol[i] + sell_vol[i]) * 100   # NaN if denom == 0
 ```
-The flip bar itself **starts** the new leg and its own volume is the first contribution to the new leg's accumulator.
+The flip bar **starts** the new leg, but neither its volume nor the next bar's is counted. The Pine draws the delta label **only on the last bar**, so every value read off a live chart includes the in-progress bar's partial volume: chart readings are a sign-and-magnitude check, never an exact one.
 
 **The ±20% threshold is SUSPECT.** It was chosen against a per-bar reading. Observed real cumulative values on the user's charts: +27%, +46%, +54%, +86%, +132%, +179% — a cumulative leg reading is structurally much larger than a per-bar one, so a ±20% gate on cumulative data is close to a no-op. **The threshold is therefore a swept parameter, never a constant.** See §5.2 and U-1.
 
@@ -357,7 +360,8 @@ class VidyaParams:
     band_mult:       float = 2.0
     atr_length:      int   = 200
     source:          str   = "close"
-    trend_rule:      str   = "band"   # "band" | "line"  -- DISPUTED, see U-3
+    smooth_length:   int   = 15       # Pine: ta.sma(vidya_value, 15)
+    trend_rule:      str   = "band"   # per the Pine source; "line" kept as an ablation
 
 def compute(bars: pd.DataFrame, params: VidyaParams = VidyaParams()) -> pd.DataFrame:
     """THE module entrypoint. Input: 4h BarFrame. Output index .equals(bars.index).
