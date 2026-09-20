@@ -477,6 +477,71 @@ def _fetch_page(
     )
 
 
+MAX_FILL_GAP_HOURS: Final[int] = 6
+
+
+def fill_missing_hours(df_1h: pd.DataFrame, max_gap_hours: int = MAX_FILL_GAP_HOURS) -> pd.DataFrame:
+    """Fill short holes in a 1h frame with flat candles.
+
+    Coinbase's candle endpoint omits any hour in which nothing traded, and an
+    exchange outage leaves a longer hole. Left alone, one missing hour drops
+    its whole 4h bucket in ``aggregate_4h``, the dropped bucket is a gap, and
+    ``trim_to_contiguous`` then keeps only the longest gap-free run. On the
+    first real fetch that discarded every bar after 2025-10-25 -- the four
+    signal-log bars of August 2026 included -- so U-0 could not even be
+    attempted.
+
+    A hole of at most ``max_gap_hours`` consecutive hours is filled the way
+    the chart draws it: open = high = low = close = the previous close,
+    volume 0. Longer holes are left as holes, for ``trim_to_contiguous`` to
+    judge. Every fill is logged with its span.
+
+    Args:
+        df_1h: A 1h frame satisfying the BarFrame schema; may contain holes.
+        max_gap_hours: Longest hole, in hours, that is filled rather than kept.
+
+    Returns:
+        A new frame; the input is never mutated.
+    """
+    _validate_schema(df_1h, what="1h input to fill_missing_hours")
+    _validate_alignment(df_1h, BAR_FREQ_1H, what="1h input to fill_missing_hours")
+    if len(df_1h) < 2:
+        return df_1h.copy()
+    full = pd.date_range(df_1h.index[0], df_1h.index[-1], freq=BAR_FREQ_1H, name=INDEX_NAME)
+    if len(full) == len(df_1h):
+        return df_1h.copy()
+    out = df_1h.reindex(full)
+    missing = out["close"].isna().to_numpy()
+    # run-length the holes; fill only the short ones
+    fill = np.zeros(len(out), dtype=bool)
+    i = 0
+    while i < len(out):
+        if not missing[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(out) and missing[j]:
+            j += 1
+        if j - i <= max_gap_hours:
+            fill[i:j] = True
+            _LOG.warning(
+                "fill_missing_hours: filled %d missing hour(s) %s..%s with flat candles",
+                j - i, full[i], full[j - 1],
+            )
+        else:
+            _LOG.warning(
+                "fill_missing_hours: left a %d-hour hole %s..%s unfilled (over %dh)",
+                j - i, full[i], full[j - 1], max_gap_hours,
+            )
+        i = j
+    prev_close = out["close"].ffill()
+    for col in ("open", "high", "low", "close"):
+        out.loc[fill, col] = prev_close[fill]
+    out.loc[fill, "volume"] = 0.0
+    out = out[~(missing & ~fill)]
+    return _coerce_frame(out)
+
+
 def aggregate_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
     """Aggregate a 1h frame into UTC-aligned 4h bars.
 
@@ -723,6 +788,7 @@ def load_bars(
             f"no 1h bars available for {product_id} in [{start_ts}, {end_ts})"
         )
 
+    window = fill_missing_hours(window)
     bars = aggregate_4h(window)
     bars = trim_to_contiguous(bars, BAR_FREQ_4H)
     validate_bars(bars, BAR_FREQ_4H)

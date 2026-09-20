@@ -150,6 +150,46 @@ def test_aggregate_4h_is_utc_aligned() -> None:
     assert (out.index.minute == 0).all()
 
 
+def test_fill_missing_hours_fills_a_short_hole_flat_and_leaves_a_long_one() -> None:
+    rows = []
+    t = pd.Timestamp("2026-08-07 00:00", tz="UTC")
+    px = 100.0
+    for h in range(30):
+        if h in (5, 6):                      # two untraded hours: fill
+            continue
+        if 12 <= h < 20:                     # an eight-hour outage: keep as a hole
+            continue
+        px += 1.0
+        rows.append(((t + pd.Timedelta(hours=h)).isoformat(), px, px + 1, px - 1, px + 0.5, 10.0))
+    out = data.fill_missing_hours(_h1(rows), max_gap_hours=6)
+    idx = pd.DatetimeIndex(out.index)
+    filled = [t + pd.Timedelta(hours=5), t + pd.Timedelta(hours=6)]
+    for ts in filled:
+        assert ts in idx
+        row = out.loc[ts]
+        prev_close = out.loc[t + pd.Timedelta(hours=4), "close"]
+        assert row["open"] == row["high"] == row["low"] == row["close"] == prev_close
+        assert row["volume"] == 0.0
+    for h in range(12, 20):
+        assert (t + pd.Timedelta(hours=h)) not in idx
+    # the input was not mutated
+    assert len(_h1(rows)) == len(rows)
+
+
+def test_a_single_missing_hour_no_longer_costs_the_4h_bucket() -> None:
+    rows = []
+    t = pd.Timestamp("2026-08-07 00:00", tz="UTC")
+    for h in range(8):
+        if h == 2:
+            continue
+        rows.append(((t + pd.Timedelta(hours=h)).isoformat(), 1.0, 2.0, 0.5, 1.5, 1.0))
+    raw = data.aggregate_4h(_h1(rows))
+    assert len(raw) == 1                      # the bucket with the hole was dropped
+    healed = data.aggregate_4h(data.fill_missing_hours(_h1(rows)))
+    assert len(healed) == 2
+    assert healed.loc[t, "volume"] == 3.0     # the flat fill adds no volume
+
+
 def test_trim_to_contiguous_removes_gapped_run() -> None:
     """A gap must not silently shift SMA/ATR windows."""
     idx = pd.DatetimeIndex(

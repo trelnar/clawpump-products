@@ -48,16 +48,19 @@ Run it as `sigbot` or your own user — it needs no privileges and touches nothi
 
 ## Use
 
-**1 — pull history** (~3 years of 1h candles, aggregated to UTC-aligned 4h, cached on disk):
+**1 — pull history** (~3 years of 1h candles, aggregated to UTC-aligned 4h, cached on disk).
+Coinbase omits any hour with no trades; holes of up to 6 hours are filled with flat candles
+(previous close, zero volume) so a single quiet hour does not cost its 4h bar. Longer holes
+still break the run, and `verify`'s window must cover the signal bars:
 
 ```bash
-python3 -m backtest.verify fetch --start 2023-01-01 --end 2026-09-05 --progress
+python3 -m backtest.verify fetch --start 2023-01-01 --end 2026-09-05
 ```
 
 **2 — verify the port against your chart. This is the step that matters.**
 
 ```bash
-python3 -m backtest.verify verify --source cache --out verify_btc_4h.csv --check-lookahead
+python3 -m backtest.verify verify --source cache --start 2023-01-01 --end 2026-09-05 --out verify_btc_4h.csv --check-lookahead
 ```
 
 Open the CSV beside TradingView and walk the U-0 / U-1 checks. The command prints a pass/fail table for the four signal bars, the chart anchors, and the delta readings, and refuses to bless the data if any fail. `--check-lookahead` separately confirms no value at bar *i* depends on bars after *i*.
