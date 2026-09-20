@@ -238,6 +238,64 @@ def test_two_pole_dots_are_zero_line_gated(tp: pd.DataFrame) -> None:
     assert (shorts["osc"] > 0).all(), "short dot printed at osc <= 0"
 
 
+def _bot_oscillator(closes: list[float]) -> list:
+    """Verbatim port of the user's VALIDATED live bot (signal_bot.py,
+    compute_oscillator). Pure-Python reference; the harness must match it
+    bit-for-bit after warm-up. Do not "improve" this function."""
+    import math
+
+    def sma(vals, n, i):
+        if i + 1 < n:
+            return None
+        return sum(vals[i - n + 1:i + 1]) / n
+
+    def stdev_pop(vals, n, i):
+        if i + 1 < n:
+            return None
+        window = vals[i - n + 1:i + 1]
+        m = sum(window) / n
+        return math.sqrt(sum((v - m) ** 2 for v in window) / n)
+
+    n = len(closes)
+    sma25 = [sma(closes, 25, i) for i in range(n)]
+    diff = [(closes[i] - sma25[i]) if sma25[i] is not None else None for i in range(n)]
+    diff_clean = [d if d is not None else 0.0 for d in diff]
+    norm = []
+    for i in range(n):
+        if diff[i] is None:
+            norm.append(None)
+            continue
+        m = sma(diff_clean, 25, i)
+        s = stdev_pop(diff_clean, 25, i)
+        norm.append(None if (m is None or s is None or s == 0) else (diff[i] - m) / s)
+    alpha = 2.0 / (20 + 1)
+    smooth1 = smooth2 = None
+    osc = []
+    for v in norm:
+        if v is None:
+            osc.append(None)
+            continue
+        smooth1 = v if smooth1 is None else (1 - alpha) * smooth1 + alpha * v
+        smooth2 = smooth1 if smooth2 is None else (1 - alpha) * smooth2 + alpha * smooth1
+        osc.append(smooth2)
+    return osc
+
+
+def test_two_pole_matches_the_validated_live_bot(bars: pd.DataFrame) -> None:
+    """U-0 regression: the harness oscillator equals the live bot's.
+
+    The bot z-scores the DISTANCE FROM THE SMA against that distance's own
+    25-bar mean and population stdev. A single z-score of close (the first
+    port) had ~half the amplitude and failed three of five chart anchors.
+    The bot pads its warm-up with zeros, so only bars past 400 are compared.
+    """
+    ref = _bot_oscillator(bars["close"].astype(float).tolist())
+    ours = two_pole.compute(bars)["osc"].to_numpy()
+    for i in range(400, len(ref)):
+        assert ref[i] is not None
+        assert abs(ours[i] - ref[i]) < 1e-9, (i, ours[i], ref[i])
+
+
 def test_two_pole_never_dots_both_ways_on_one_bar(tp: pd.DataFrame) -> None:
     both = tp["dot_long"].fillna(False).astype(bool) & tp["dot_short"].fillna(False).astype(bool)
     assert not both.any()

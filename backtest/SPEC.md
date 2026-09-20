@@ -31,17 +31,22 @@ Parameters (user's chart, confirmed against Pine source):
 | Param | Value | Note |
 |---|---|---|
 | `filter_length` | **20** | Script default is 15; the user's chart is customised to 20. Default in code is 20. |
-| `sma_length` | **25** | Used for **both** the mean and the normalisation denominator. |
+| `sma_length` | **25** | Used for the SMA, for the mean of the distance-from-SMA, **and** for the normalisation denominator. |
 | `ddof` | **0** | **Population** standard deviation. Not sample. `Series.std(ddof=0)`. |
 | `signal_delay` | **4** | Signal line is a 4-bar delayed copy of the oscillator. |
 
 **Step 1 — normalise:**
 ```
-sma[i] = mean(close[i-24 .. i])              # 25-bar window
-sd[i]  = popstd(close[i-24 .. i])            # 25-bar window, ddof=0
-z[i]   = (close[i] - sma[i]) / sd[i]         # NaN where sd == 0
+sma[i]  = mean(close[i-24 .. i])             # 25-bar window
+diff[i] = close[i] - sma[i]                  # distance from the SMA
+dm[i]   = mean(diff[i-24 .. i])              # 25-bar window
+sd[i]   = popstd(diff[i-24 .. i])            # 25-bar window, ddof=0
+z[i]    = (diff[i] - dm[i]) / sd[i]          # NaN where sd == 0
 ```
-`z` is NaN for the first 24 bars.
+`z` is NaN for the first 48 bars. The z-score is of the **distance from the
+SMA**, not of the close (corrected 2026-09-20 from the user's validated live
+bot, `signal_bot.py`; the single z-score of close failed U-0 on three of five
+anchors).
 
 **Step 2 — two-pole filter** (EMA-style smoothing applied twice):
 ```

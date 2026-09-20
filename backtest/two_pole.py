@@ -1,6 +1,6 @@
 """Two-Pole Oscillator [BigBeluga] -- port for the BTC 4h backtest harness.
 
-Implements SPEC.md 2.1 and 3.3: the 25-bar z-score normalisation, the two-pole
+Implements SPEC.md 2.1 and 3.3: the 25-bar two-stage normalisation, the two-pole
 (twice-applied EMA) filter, the 4-bar delayed signal line, ZERO-LINE-GATED dot
 detection, and the switchable diagnostic tint.
 
@@ -8,8 +8,10 @@ Pine origin
 -----------
 BigBeluga's "Two-Pole Oscillator". The user's chart is customised to
 filter_length=20 (the published script defaults to 15), with sma_length=25 used
-for BOTH the mean and the normalisation denominator, and a POPULATION standard
-deviation (ddof=0).
+for the SMA, for the mean of the distance-from-SMA, AND for its normalisation
+denominator, with a POPULATION standard deviation (ddof=0). Normalisation is
+two-stage (distance from SMA, then z-score of that distance) -- confirmed
+against the user's validated live bot on 2026-09-20 (checklist U-0).
 
 TRADE THE DOT, NOT THE COLOUR
 -----------------------------
@@ -28,12 +30,13 @@ The filter is heavily smoothed: a single -2% candle moved it by ~0.001. No test
 may assume a sharp candle swings the oscillator; use sustained multi-bar
 excursions.
 
-PROVISIONAL
------------
-This port is synthetic-data tested only. Until the `--verify` CSV has been
-diffed against the user's TradingView chart (checklist U-0), every value it
-produces is provisional and may be measuring a bug rather than a market.
-Points that need chart verification are marked `# VERIFY:` inline.
+VERIFICATION STATUS (U-0)
+-------------------------
+The single z-score port was diffed against the chart on 2026-09-20 and FAILED
+on three of five anchors. The normalisation was then corrected from the user's
+validated live bot (signal_bot.py). The corrected port must be re-run against
+SIGNAL_LOG before any backtest number is trusted. Remaining `# VERIFY:` marks
+are points not yet read off the live chart.
 
 OPEN QUESTIONS:
   * U-2 (tint rule: slope or osc/signal cross). The source specs disagree.
@@ -99,8 +102,9 @@ class TwoPoleParams:
         user's chart is customised to 20; the published Pine script defaults to
         15 (checklist U-5).
     sma_length:
-        Window used for BOTH the rolling mean and the normalisation
-        denominator (the standard deviation).
+        Window used for the SMA of the source, for the rolling mean of the
+        distance from that SMA, and for its normalisation denominator (the
+        population standard deviation of that distance).
     signal_delay:
         The signal line is a plain N-bar delayed copy of the oscillator.
     ddof:
@@ -240,8 +244,8 @@ def compute(
         ``dot_short``   bool       cross_dn AND ``osc > 0``  (purple dot)
         ==============  =========  ==================================================
 
-        Warmup: ``osc`` is NaN for the first ``sma_length - 1`` bars and the dot
-        columns are False there. ``dot_long`` and ``dot_short`` are never both
+        Warmup: ``osc`` is NaN for the first ``2 * (sma_length - 1)`` bars and
+        the dot columns are False there. ``dot_long`` and ``dot_short`` are never both
         True on the same bar (the two crossings are mutually exclusive, and the
         zero-line gates are disjoint on top of that).
 
@@ -257,20 +261,26 @@ def compute(
     src = bars[params.source].astype("float64")
 
     # ---- Step 1: normalise (SPEC.md 2.1 step 1) -----------------------------
-    # Pine origin: (src - ta.sma(src, 25)) / ta.stdev(src, 25).
-    # VERIFY: that the user's chart uses the SAME length (25) for the mean and
-    # for the denominator, and that Pine's ta.stdev here is population (ddof=0)
-    # rather than sample. Both are asserted by SPEC.md 2.1 but neither has been
-    # read off the live chart.
+    # Pine origin (per the user's VALIDATED live bot, signal_bot.py, which
+    # matches his TradingView chart):
+    #     diff = close - ta.sma(close, 25)
+    #     norm = (diff - ta.sma(diff, 25)) / ta.stdev(diff, 25)
+    # i.e. the z-score is taken of the DISTANCE FROM THE SMA, against that
+    # distance's own 25-bar mean and population stdev -- NOT a z-score of the
+    # close itself. The earlier single z-score (close - sma) / stdev(close)
+    # produced values with roughly half the amplitude and failed U-0 on
+    # 2026-08-13, 2026-08-30 and 2026-07-31.
     window = params.sma_length
     sma = src.rolling(window, min_periods=window).mean()
-    sd = src.rolling(window, min_periods=window).std(ddof=params.ddof)
+    diff = src - sma  # NaN for the first (sma_length - 1) bars
+    diff_mean = diff.rolling(window, min_periods=window).mean()
+    sd = diff.rolling(window, min_periods=window).std(ddof=params.ddof)
 
     # A zero-variance window would divide by zero. Blank it; two_pole_filter
     # then HOLDS its previous state across the gap rather than emitting NaN.
     sd = sd.where(sd > 0.0)
 
-    z = (src - sma) / sd  # NaN for the first (sma_length - 1) bars
+    z = (diff - diff_mean) / sd  # NaN for the first 2*(sma_length - 1) bars
 
     # ---- Step 2: two-pole filter (SPEC.md 2.1 step 2) -----------------------
     osc = two_pole_filter(z, params.filter_length)
