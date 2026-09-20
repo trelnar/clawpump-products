@@ -468,7 +468,7 @@ def check_chart_anchors(
 
 def check_delta_readings(
     verify_frame: pd.DataFrame,
-    tolerance: float = 1.0,
+    tolerance: float = 5.0,
 ) -> pd.DataFrame:
     """Compare cumulative delta_pct against the user's chart readings -- U-1.
 
@@ -479,8 +479,11 @@ def check_delta_readings(
     +53.88. The 2026-08-13 entry records no number but the chart showed a
     NEGATIVE delta, so that one is checked for sign only.
 
-    `tolerance` is absolute, in percentage points; 1.0 is loose on purpose
-    because these were read off a chart by eye.
+    `tolerance` is absolute, in percentage points. The Pine draws the delta
+    label only on the LAST bar, so every chart reading includes the in-progress
+    bar's partial volume; 5.0 covers that. The sign-only check likewise passes
+    when the closed-bar value is within `tolerance` of zero, because a partial
+    bar can flip the sign of a near-zero leg.
 
     Returns
     -------
@@ -526,8 +529,10 @@ def check_delta_readings(
             note = "" if ok else "MISMATCH -- accumulation semantics or leg boundaries (U-1/U-3)"
         else:
             abs_err = float("nan")
-            ok = bool(not pd.isna(actual) and np.sign(actual) == expected_sign)
-            note = "sign-only check" if ok else "SIGN MISMATCH -- expected negative delta (U-1)"
+            ok = bool(not pd.isna(actual)
+                      and (np.sign(actual) == expected_sign or abs(actual) <= tolerance))
+            note = ("sign-only check" if ok
+                    else "SIGN MISMATCH -- expected negative delta (U-1)")
 
         rows.append({
             "ts": entry["ts"],

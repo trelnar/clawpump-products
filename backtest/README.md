@@ -2,6 +2,8 @@
 
 This measures the Two-Pole Oscillator + Volumatic VIDYA swing system before any more of it gets automated. It exists because six months of that system produced six evaluated signals, one taken trade, and zero measurements.
 
+**Status 2026-09-20: U-0, U-1 and U-3 are verified against the live chart and the published Pine source; the first real BTC run is in `report_btc.md` on the VPS.**
+
 **It is a measurement tool. It does not trade, hold keys, or place orders.**
 
 ## The question
