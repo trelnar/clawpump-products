@@ -1,0 +1,5 @@
+.cache/
+__pycache__/
+*.pyc
+report.md
+verify_btc_4h.csv
